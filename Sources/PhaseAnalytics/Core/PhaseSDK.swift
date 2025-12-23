@@ -246,6 +246,17 @@ public final class PhaseSDK: Sendable {
         logger.info("Device identified and session started")
 
         await processPendingCalls()
+
+        if isOnline,
+           let queue = offlineQueue.withLock({ $0 }),
+           let sender = batchSender.withLock({ $0 })
+        {
+            let queueSize = await queue.getSize()
+            if queueSize > 0 {
+                logger.info("Flushing offline queue after identification (\(queueSize) items)")
+                await sender.flush()
+            }
+        }
     }
 
     /// Track custom event
