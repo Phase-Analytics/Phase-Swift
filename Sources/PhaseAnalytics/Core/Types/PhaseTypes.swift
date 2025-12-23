@@ -265,26 +265,22 @@ extension BatchItem: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {
-        case .device(let payload, let clientOrder, let retryCount):
+        case .device(let payload, let clientOrder, _):
             try container.encode("device", forKey: .type)
             try container.encode(payload, forKey: .payload)
             try container.encode(clientOrder, forKey: .clientOrder)
-            try container.encodeIfPresent(retryCount, forKey: .retryCount)
-        case .session(let payload, let clientOrder, let retryCount):
+        case .session(let payload, let clientOrder, _):
             try container.encode("session", forKey: .type)
             try container.encode(payload, forKey: .payload)
             try container.encode(clientOrder, forKey: .clientOrder)
-            try container.encodeIfPresent(retryCount, forKey: .retryCount)
-        case .event(let payload, let clientOrder, let retryCount):
+        case .event(let payload, let clientOrder, _):
             try container.encode("event", forKey: .type)
             try container.encode(payload, forKey: .payload)
             try container.encode(clientOrder, forKey: .clientOrder)
-            try container.encodeIfPresent(retryCount, forKey: .retryCount)
-        case .ping(let payload, let clientOrder, let retryCount):
+        case .ping(let payload, let clientOrder, _):
             try container.encode("ping", forKey: .type)
             try container.encode(payload, forKey: .payload)
             try container.encode(clientOrder, forKey: .clientOrder)
-            try container.encodeIfPresent(retryCount, forKey: .retryCount)
         }
     }
 }
