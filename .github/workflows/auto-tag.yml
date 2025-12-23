@@ -20,9 +20,12 @@ jobs:
       - name: Get latest tag
         id: get_tag
         run: |
-          # Get the latest tag
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          LATEST_TAG=$(git tag --sort=-version:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || echo "0.0.0")
+
+          LATEST_TAG=${LATEST_TAG#v}
+
           echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Found latest tag: $LATEST_TAG"
 
           # Check if current commit already has a tag
           CURRENT_TAG=$(git describe --exact-match --tags HEAD 2>/dev/null || echo "")
@@ -41,12 +44,10 @@ jobs:
         if: steps.get_tag.outputs.skip == 'false'
         run: |
           LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
-
-          # Parse version (remove 'v' prefix if exists)
-          VERSION=${LATEST_TAG#v}
+          echo "Bumping from: $LATEST_TAG"
 
           # Split version into parts
-          IFS='.' read -r -a VERSION_PARTS <<< "$VERSION"
+          IFS='.' read -r -a VERSION_PARTS <<< "$LATEST_TAG"
           MAJOR="${VERSION_PARTS[0]:-0}"
           MINOR="${VERSION_PARTS[1]:-0}"
           PATCH="${VERSION_PARTS[2]:-0}"
@@ -55,10 +56,10 @@ jobs:
           PATCH=$((PATCH + 1))
 
           NEW_VERSION="$MAJOR.$MINOR.$PATCH"
-          NEW_TAG="v$NEW_VERSION"
+          NEW_TAG="$NEW_VERSION"
 
           echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
-          echo "New tag will be: $NEW_TAG"
+          echo "New tag will be: $NEW_TAG (was: $LATEST_TAG)"
 
       - name: Create and push tag
         if: steps.get_tag.outputs.skip == 'false'
@@ -78,7 +79,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.bump_version.outputs.new_tag }}
-          name: ${{ steps.bump_version.outputs.new_tag }}
+          name: Release ${{ steps.bump_version.outputs.new_tag }}
           body: |
             🍎 **Swift Package for Phase Analytics**
 
@@ -92,9 +93,9 @@ jobs:
             ]
             ```
 
-            ## Changes
+            ## What's Changed
 
-            See commit history for detailed changes.
+            See below for detailed changes.
           draft: false
           prerelease: false
           generate_release_notes: true
