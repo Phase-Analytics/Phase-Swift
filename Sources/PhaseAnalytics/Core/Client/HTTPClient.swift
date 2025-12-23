@@ -173,7 +173,7 @@ internal final class HTTPClient: Sendable {
             } catch let error as HTTPError {
                 lastError = error
                 if !error.isRetryable() {
-                    logger.error("\(operationName) failed with HTTP \(error.statusCode). Not retryable.")
+                    logger.error("\(operationName) failed with HTTP \(error.statusCode). Not retryable: \(error.message)")
                     return .failure(.httpError(statusCode: error.statusCode, message: error.message))
                 }
             } catch is CancellationError {
