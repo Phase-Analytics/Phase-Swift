@@ -320,6 +320,7 @@ internal struct StorageKeys {
     static let deviceID = "phase-analytics/device-id"
     static let deviceInfo = "phase-analytics/device-info"
     static let offlineQueue = "phase-analytics/offline-queue"
+    static let apiKey = "phase-analytics/api-key"
 }
 
 public struct AnyCodable: Codable, @unchecked Sendable {

@@ -8,6 +8,7 @@ internal actor DeviceManager {
     private let getDeviceInfo: @Sendable () async -> DeviceInfo
     private let collectDeviceInfo: Bool
     private let collectLocale: Bool
+    private let apiKey: String
 
     private var initPromise: Task<String, Never>?
 
@@ -24,6 +25,7 @@ internal actor DeviceManager {
         self.getDeviceInfo = getDeviceInfo
         self.collectDeviceInfo = config.deviceInfo
         self.collectLocale = config.userLocale
+        self.apiKey = config.apiKey
     }
 
     func initialize(isOnline: Bool) async -> String {
@@ -46,9 +48,25 @@ internal actor DeviceManager {
     }
 
     private func doInitialize(isOnline: Bool) async -> String {
+        let storedApiKeyResult = await storage.getItem(key: StorageKeys.apiKey) as Result<String?, Error>
+        var shouldResetDevice = false
+
+        if case .success(let storedApiKey) = storedApiKeyResult {
+            if let storedApiKey = storedApiKey, storedApiKey != apiKey {
+                logger.info("API key changed. Resetting device ID.")
+                shouldResetDevice = true
+
+                _ = await storage.removeItem(key: StorageKeys.deviceID)
+                _ = await storage.removeItem(key: StorageKeys.deviceInfo)
+            }
+        }
+
+        _ = await storage.setItem(key: StorageKeys.apiKey, value: apiKey)
+
         let result = await storage.getItem(key: StorageKeys.deviceID) as Result<String?, Error>
 
-        if case .success(let stored) = result,
+        if !shouldResetDevice,
+            case .success(let stored) = result,
             let stored = stored,
             case .success = Validator.validateDeviceID(stored)
         {
