@@ -23,7 +23,6 @@ internal final class HTTPClient: Sendable {
     private func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.sortedKeys]
         return encoder
     }
 
@@ -68,6 +67,11 @@ internal final class HTTPClient: Sendable {
         let jsonData: Data
         do {
             jsonData = try makeEncoder().encode(body)
+
+            if endpoint.contains("/batch"), let jsonString = String(data: jsonData, encoding: .utf8) {
+                let preview = jsonString.prefix(500)
+                logger.debug("[\(operationName)] Request JSON (first 500 chars): \(preview)")
+            }
         } catch {
             return .failure(.encodingError)
         }
@@ -197,6 +201,11 @@ internal final class HTTPClient: Sendable {
         let jsonData: Data
         do {
             jsonData = try makeEncoder().encode(body)
+
+            if endpoint.contains("/batch"), let jsonString = String(data: jsonData, encoding: .utf8) {
+                let preview = jsonString.prefix(500)
+                logger.debug("[\(operationName)] Request JSON (first 500 chars): \(preview)")
+            }
         } catch {
             return .failure(.encodingError)
         }
