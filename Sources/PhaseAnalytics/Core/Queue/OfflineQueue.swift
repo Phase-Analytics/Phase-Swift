@@ -8,7 +8,7 @@ internal actor OfflineQueue {
 
     private var operationQueue = Task<Void, Never> {}
 
-    private static let maxQueueSize = 5000
+    private static let maxQueueSize = 1000
 
     init(storage: StorageAdapter) {
         self.storage = storage

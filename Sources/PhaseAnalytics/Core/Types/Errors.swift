@@ -15,6 +15,7 @@ public enum PhaseError: Error, Sendable {
     case storageError(String)
     case encodingError
     case decodingError
+    case timeout
 
     public var localizedDescription: String {
         switch self {
@@ -34,6 +35,8 @@ public enum PhaseError: Error, Sendable {
             return "Failed to encode data"
         case .decodingError:
             return "Failed to decode data"
+        case .timeout:
+            return "Operation timed out"
         }
     }
 }

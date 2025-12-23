@@ -5,7 +5,7 @@ internal actor BatchSender {
     private let offlineQueue: OfflineQueue
     private var isFlushing = false
 
-    private static let maxRetryCount = 5
+    private static let flushTimeoutSeconds: TimeInterval = 5.0
 
     init(httpClient: HTTPClient, offlineQueue: OfflineQueue) {
         self.httpClient = httpClient
@@ -21,6 +21,30 @@ internal actor BatchSender {
         isFlushing = true
         defer { isFlushing = false }
 
+        await flushWithTimeout()
+    }
+
+    private func flushWithTimeout() async {
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(Self.flushTimeoutSeconds * 1_000_000_000))
+                    throw PhaseError.timeout
+                }
+
+                group.addTask {
+                    await self.performFlush()
+                }
+
+                try await group.next()
+                group.cancelAll()
+            }
+        } catch {
+            logger.error("Flush failed or timed out. Dropping remaining items.", error)
+        }
+    }
+
+    private func performFlush() async {
         let items = await offlineQueue.dequeueAll()
         guard !items.isEmpty else {
             return
@@ -30,72 +54,26 @@ internal actor BatchSender {
         let batches = splitIntoBatches(deduplicatedItems)
 
         for batch in batches {
-            let result = await sendBatch(batch)
-
-            if case .failure(let error) = result {
-                logger.error("Batch request failed. Will retry.", error)
-                await requeue(batch)
+            do {
+                try await sendBatch(batch)
+            } catch {
+                logger.error("Batch send error. Dropping batch (fire & forget).", error)
             }
         }
     }
 
-    private func sendBatch(_ items: [BatchItem]) async -> Result<BatchResponse, PhaseError> {
+    private func sendBatch(_ items: [BatchItem]) async throws {
         let request = BatchRequest(items: items)
         let result = await httpClient.sendBatch(request)
 
-        if case .success(let response) = result {
-            if response.failed > 0 {
-                let total = (response.processed ?? 0) + response.failed
-                logger.error("Batch partially failed: \(response.failed)/\(total) items")
-
-                var failedItems: [BatchItem] = []
-
-                for error in response.errors {
-                    guard let clientOrder = error.clientOrder else {
-                        logger.error("Error missing clientOrder. Cannot re-enqueue.")
-                        continue
-                    }
-
-                    if let failedItem = items.first(where: { $0.clientOrder == clientOrder }) {
-                        failedItems.append(failedItem)
-                    }
-                }
-
-                if !failedItems.isEmpty {
-                    await requeue(failedItems)
-                }
-            }
+        if case .failure = result {
+            logger.warn("Batch request failed. Dropping batch (fire & forget).")
+            return
         }
 
-        return result
-    }
-
-    private func requeue(_ items: [BatchItem]) async {
-        await withTaskGroup(of: Void.self) { group in
-            for item in items {
-                group.addTask {
-                    let retryCount = (item.retryCount ?? 0) + 1
-
-                    guard retryCount <= Self.maxRetryCount else {
-                        logger.error("Max retries exceeded. Dropping item.")
-                        return
-                    }
-
-                    let newItem: BatchItem
-                    switch item {
-                    case .device(let payload, let order, _):
-                        newItem = .device(payload: payload, clientOrder: order, retryCount: retryCount)
-                    case .session(let payload, let order, _):
-                        newItem = .session(payload: payload, clientOrder: order, retryCount: retryCount)
-                    case .event(let payload, let order, _):
-                        newItem = .event(payload: payload, clientOrder: order, retryCount: retryCount)
-                    case .ping(let payload, let order, _):
-                        newItem = .ping(payload: payload, clientOrder: order, retryCount: retryCount)
-                    }
-
-                    await self.offlineQueue.enqueue(newItem)
-                }
-            }
+        if case .success(let response) = result, response.failed > 0 {
+            let total = (response.processed ?? 0) + response.failed
+            logger.warn("Batch partially failed: \(response.failed)/\(total) items dropped.")
         }
     }
 
