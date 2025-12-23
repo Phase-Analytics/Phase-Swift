@@ -223,11 +223,6 @@ public final class PhaseSDK: Sendable {
             return
         }
 
-        guard !isIdentified.withLock({ $0 }) else {
-            logger.warn("Device already identified. Skipping duplicate call.")
-            return
-        }
-
         guard let devManager = deviceManager.withLock({ $0 }),
             let sessManager = sessionManager.withLock({ $0 }),
             let adapter = networkAdapter.withLock({ $0 })
