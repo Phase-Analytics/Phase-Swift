@@ -103,7 +103,7 @@ internal final class HTTPClient: Sendable {
             guard httpResponse.statusCode == 200 else {
                 let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
                 let sanitized = sanitizeError(errorMessage)
-                logger.error("\(operationName) failed with HTTP \(httpResponse.statusCode)")
+                logger.error("\(operationName) failed with HTTP \(httpResponse.statusCode): \(sanitized)")
                 return .failure(.httpError(statusCode: httpResponse.statusCode, message: sanitized))
             }
 
