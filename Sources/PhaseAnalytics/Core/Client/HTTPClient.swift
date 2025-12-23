@@ -70,7 +70,7 @@ internal final class HTTPClient: Sendable {
 
             if endpoint.contains("/batch"), let jsonString = String(data: jsonData, encoding: .utf8) {
                 let preview = jsonString.prefix(500)
-                logger.debug("[\(operationName)] Request JSON (first 500 chars): \(preview)")
+                logger.info("[\(operationName)] Request JSON (first 500 chars): \(preview)")
             }
         } catch {
             return .failure(.encodingError)
@@ -204,7 +204,7 @@ internal final class HTTPClient: Sendable {
 
             if endpoint.contains("/batch"), let jsonString = String(data: jsonData, encoding: .utf8) {
                 let preview = jsonString.prefix(500)
-                logger.debug("[\(operationName)] Request JSON (first 500 chars): \(preview)")
+                logger.info("[\(operationName)] Request JSON (first 500 chars): \(preview)")
             }
         } catch {
             return .failure(.encodingError)
