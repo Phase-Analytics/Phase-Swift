@@ -67,11 +67,6 @@ internal final class HTTPClient: Sendable {
         let jsonData: Data
         do {
             jsonData = try makeEncoder().encode(body)
-
-            if endpoint.contains("/batch"), let jsonString = String(data: jsonData, encoding: .utf8) {
-                let preview = jsonString.prefix(2000)
-                logger.info("[\(operationName)] Request JSON (first 2000 chars): \(preview)")
-            }
         } catch {
             return .failure(.encodingError)
         }
@@ -201,11 +196,6 @@ internal final class HTTPClient: Sendable {
         let jsonData: Data
         do {
             jsonData = try makeEncoder().encode(body)
-
-            if endpoint.contains("/batch"), let jsonString = String(data: jsonData, encoding: .utf8) {
-                let preview = jsonString.prefix(2000)
-                logger.info("[\(operationName)] Request JSON (first 2000 chars): \(preview)")
-            }
         } catch {
             return .failure(.encodingError)
         }
