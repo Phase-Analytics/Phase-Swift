@@ -5,7 +5,7 @@ internal actor DeviceManager {
     private let httpClient: HTTPClient
     private let offlineQueue: OfflineQueue
     private let storage: StorageAdapter
-    private let getDeviceInfo: @Sendable () -> DeviceInfo
+    private let getDeviceInfo: @Sendable () async -> DeviceInfo
     private let collectDeviceInfo: Bool
     private let collectLocale: Bool
 
@@ -15,7 +15,7 @@ internal actor DeviceManager {
         httpClient: HTTPClient,
         offlineQueue: OfflineQueue,
         storage: StorageAdapter,
-        getDeviceInfo: @escaping @Sendable () -> DeviceInfo,
+        getDeviceInfo: @escaping @Sendable () async -> DeviceInfo,
         config: PhaseConfig
     ) {
         self.httpClient = httpClient
@@ -75,7 +75,7 @@ internal actor DeviceManager {
     }
 
     private func shouldUpdateDevice() async -> Bool {
-        guard let current = buildDevicePayload() else {
+        guard let current = await buildDevicePayload() else {
             logger.error("Device ID not set. Cannot check for updates.")
             return false
         }
@@ -96,7 +96,7 @@ internal actor DeviceManager {
     }
 
     private func registerDevice(isOnline: Bool, properties: DeviceProperties? = nil, force: Bool = false) async {
-        guard let payload = buildDevicePayload(properties: properties) else {
+        guard let payload = await buildDevicePayload(properties: properties) else {
             logger.error("Device ID not set. Cannot register device.")
             return
         }
@@ -126,10 +126,10 @@ internal actor DeviceManager {
         }
     }
 
-    private func buildDevicePayload(properties: DeviceProperties? = nil) -> CreateDeviceRequest? {
+    private func buildDevicePayload(properties: DeviceProperties? = nil) async -> CreateDeviceRequest? {
         guard let deviceID = deviceID else { return nil }
 
-        let info = getDeviceInfo()
+        let info = await getDeviceInfo()
         let propsDict: [String: AnyCodable]? = properties?.dictionary.mapValues { AnyCodable($0) }
 
         return CreateDeviceRequest(

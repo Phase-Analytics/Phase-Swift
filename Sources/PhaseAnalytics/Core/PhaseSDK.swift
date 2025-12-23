@@ -88,7 +88,7 @@ public final class PhaseSDK: Sendable {
 
     internal func _initialize(
         config: PhaseConfig,
-        getDeviceInfo: @escaping @Sendable () -> DeviceInfo,
+        getDeviceInfo: @escaping @Sendable () async -> DeviceInfo,
         networkAdapter: NetworkAdapter
     ) async throws {
         if isInitialized.withLock({ $0 }) {
@@ -129,7 +129,7 @@ public final class PhaseSDK: Sendable {
 
     private func doInitialize(
         config: PhaseConfig,
-        getDeviceInfo: @escaping @Sendable () -> DeviceInfo,
+        getDeviceInfo: @escaping @Sendable () async -> DeviceInfo,
         networkAdapter: NetworkAdapter
     ) async throws {
 
