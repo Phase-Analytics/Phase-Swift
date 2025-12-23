@@ -5,7 +5,7 @@ internal actor BatchSender {
     private let offlineQueue: OfflineQueue
     private var isFlushing = false
 
-    private static let flushTimeoutSeconds: TimeInterval = 5.0
+    private static let flushTimeoutSeconds: TimeInterval = 5.0 
 
     init(httpClient: HTTPClient, offlineQueue: OfflineQueue) {
         self.httpClient = httpClient
