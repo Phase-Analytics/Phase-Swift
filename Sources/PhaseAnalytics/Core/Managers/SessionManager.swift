@@ -9,16 +9,19 @@ internal actor SessionManager {
     private let httpClient: HTTPClient
     private let offlineQueue: OfflineQueue
     private let deviceID: String
+    private let storage: StorageAdapter
 
     private var startPromise: Task<String, Never>?
 
     private static let pingInterval: TimeInterval = 5.0
     private static let inactivityTimeout: TimeInterval = 5 * 60
+    private static let maxSessionAge: TimeInterval = 60 * 60
 
-    init(httpClient: HTTPClient, offlineQueue: OfflineQueue, deviceID: String) {
+    init(httpClient: HTTPClient, offlineQueue: OfflineQueue, deviceID: String, storage: StorageAdapter) {
         self.httpClient = httpClient
         self.offlineQueue = offlineQueue
         self.deviceID = deviceID
+        self.storage = storage
     }
 
     func start(isOnline: Bool) async -> String {
@@ -56,11 +59,17 @@ internal actor SessionManager {
             }
         }
 
+        let startedAt = currentISO8601Timestamp()
         let payload = CreateSessionRequest(
             sessionId: sessionID!,
             deviceId: deviceID,
-            startedAt: currentISO8601Timestamp()
+            startedAt: startedAt
         )
+
+        let persistResult = await storage.setItem(key: StorageKeys.sessionStartedAt, value: startedAt)
+        if case .failure = persistResult {
+            logger.warn("Failed to persist session start time. Session age checks may not work correctly.")
+        }
 
         if isOnline {
             let result = await httpClient.createSession(payload)
@@ -84,6 +93,29 @@ internal actor SessionManager {
     }
 
     func resume() async {
+        guard sessionID != nil else {
+            return
+        }
+
+        let sessionStartedResult = await storage.getItem(key: StorageKeys.sessionStartedAt) as Result<String?, Error>
+        if case .success(let startedAtString) = sessionStartedResult,
+           let startedAtString = startedAtString,
+           let startedAtDate = ISO8601DateFormatter().date(from: startedAtString) {
+            let sessionAge = Date().timeIntervalSince(startedAtDate)
+
+            if sessionAge > Self.maxSessionAge {
+                logger.info(
+                    "Session too old (\(Int(sessionAge))s). Starting new session."
+                )
+
+                sessionID = nil
+                self.pausedAt = nil
+
+                _ = await start(isOnline: isOnline)
+                return
+            }
+        }
+
         guard let pausedAt = pausedAt else {
             startPingInterval()
             return

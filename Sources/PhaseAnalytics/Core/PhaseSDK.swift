@@ -174,7 +174,8 @@ public final class PhaseSDK: Sendable {
         let sessManager = SessionManager(
             httpClient: client,
             offlineQueue: queue,
-            deviceID: deviceID
+            deviceID: deviceID,
+            storage: storage
         )
         sessionManager.withLock { $0 = sessManager }
 

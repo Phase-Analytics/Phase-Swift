@@ -321,6 +321,7 @@ internal struct StorageKeys {
     static let deviceInfo = "phase-analytics/device-info"
     static let offlineQueue = "phase-analytics/offline-queue"
     static let apiKey = "phase-analytics/api-key"
+    static let sessionStartedAt = "phase-analytics/session-started-at"
 }
 
 public struct AnyCodable: Codable, @unchecked Sendable {
