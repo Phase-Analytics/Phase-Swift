@@ -259,7 +259,7 @@ public final class PhaseSDK: Sendable {
     /// Calls are automatically queued if SDK is not ready yet.
     ///
     /// - Parameters:
-    ///   - name: Event name (required, alphanumeric, `_`, `-`, `.`, `/`)
+    ///   - name: Event name (required, alphanumeric, `_`, `-`, `.`, `/`, space)
     ///   - params: Event parameters (optional, primitives only)
     ///
     /// ## Example
@@ -341,7 +341,7 @@ public final class PhaseSDK: Sendable {
     /// Track custom event (static convenience method)
     ///
     /// - Parameters:
-    ///   - name: Event name (required, alphanumeric, `_`, `-`, `.`, `/`)
+    ///   - name: Event name (required, alphanumeric, `_`, `-`, `.`, `/`, space)
     ///   - params: Event parameters (optional, primitives only)
     ///
     /// ## Example

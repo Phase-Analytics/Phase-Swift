@@ -24,7 +24,7 @@ internal actor EventManager {
 
     func track(name: String, params: EventParams?, isScreen: Bool = false) async {
         guard case .success = Validator.validateEventName(name) else {
-            logger.error("Invalid event name. Use alphanumeric, _, -, ., or /")
+            logger.error("Invalid event name. Use alphanumeric, _, -, ., /, or space")
             return
         }
 

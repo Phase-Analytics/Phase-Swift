@@ -16,7 +16,7 @@ public struct ValidationConstants {
     public struct EventName {
         public static let minLength = 1
         public static let maxLength = 256
-        public static let pattern = #"^[\w./-]+$"#
+        public static let pattern = #"^[\w./ -]+$"#
     }
 
     public struct EventParams {

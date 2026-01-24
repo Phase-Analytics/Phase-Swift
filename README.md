@@ -259,9 +259,9 @@ All parameters must be primitives: `String`, `Int`, `Double`, `Bool`, or `nil`.
 
 ## Event Naming Rules
 
-- Alphanumeric characters, underscores (`_`), hyphens (`-`), periods (`.`), and forward slashes (`/`)
+- Alphanumeric characters, underscores (`_`), hyphens (`-`), periods (`.`), forward slashes (`/`), and spaces
 - 1-256 characters
-- Examples: `purchase`, `user.signup`, `payment/success`
+- Examples: `purchase`, `user.signup`, `payment/success`, `Button Clicked`
 
 ## Dependencies
 
