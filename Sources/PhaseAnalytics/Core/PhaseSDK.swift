@@ -80,7 +80,15 @@ public final class PhaseSDK: Sendable {
         #else
             try await _initialize(
                 config: config,
-                getDeviceInfo: { DeviceInfo(osVersion: nil, platform: nil, locale: nil, model: nil) },
+                getDeviceInfo: {
+                    DeviceInfo(
+                        osVersion: nil,
+                        platform: nil,
+                        locale: nil,
+                        model: nil,
+                        appVersion: nil
+                    )
+                },
                 networkAdapter: NetworkMonitor()
             )
         #endif

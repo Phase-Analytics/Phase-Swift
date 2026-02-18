@@ -39,7 +39,7 @@ Add Phase Analytics to your project using Swift Package Manager:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Phase-Analytics/Phase-Swift", from: "0.1.5")
+    .package(url: "https://github.com/Phase-Analytics/Phase-Swift", from: "0.1.6")
 ]
 ```
 
@@ -130,7 +130,7 @@ The `Phase` view and `initialize()` method accept the following parameters:
 | `apiKey` | `String` | **Required** | Your Phase API key (starts with `phase_`) |
 | `baseURL` | `String` | `"https://api.phase.sh"` | Custom API endpoint for self-hosted deployments |
 | `logLevel` | `LogLevel` | `.none` | Console logging level (`.info`, `.warn`, `.error`, `.none`) |
-| `deviceInfo` | `Bool` | `true` | Collect device metadata (model, OS version, platform) |
+| `deviceInfo` | `Bool` | `true` | Collect device metadata (model, OS version, platform, app version as `app_version`) |
 | `userLocale` | `Bool` | `true` | Collect user locale and timezone information |
 
 ### Example with Configuration
@@ -233,7 +233,7 @@ Phase Analytics is designed with privacy as a core principle:
 
 - No personal data is collected by default
 - Device IDs are generated locally and stored persistently using `UserDefaults`
-- Only technical metadata is collected (OS version, platform, locale)
+- Only technical metadata is collected (OS version, platform, locale, app version)
 - Geolocation is resolved server-side from IP address
 - All data collection is optional via configuration
 

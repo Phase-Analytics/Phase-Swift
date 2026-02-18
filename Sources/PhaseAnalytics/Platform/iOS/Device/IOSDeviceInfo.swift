@@ -11,7 +11,8 @@ import Foundation
             osVersion: await getOSVersion(),
             platform: .ios,
             locale: getLocale(),
-            model: fallbackModel
+            model: fallbackModel,
+            appVersion: getAppVersion()
         )
     }
 
@@ -43,5 +44,15 @@ import Foundation
     @MainActor
     private func getModel() -> String {
         return UIDevice.current.model
+    }
+
+    private func getAppVersion() -> String? {
+        guard
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return version
     }
 #endif

@@ -66,17 +66,20 @@ public struct DeviceInfo: Sendable {
     public let platform: Platform?
     public let locale: String?
     public let model: String?
+    public let appVersion: String?
 
     public init(
         osVersion: String?,
         platform: Platform?,
         locale: String?,
-        model: String?
+        model: String?,
+        appVersion: String?
     ) {
         self.osVersion = osVersion
         self.platform = platform
         self.locale = locale
         self.model = model
+        self.appVersion = appVersion
     }
 }
 

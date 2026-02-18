@@ -148,7 +148,8 @@ internal actor DeviceManager {
         guard let deviceID = deviceID else { return nil }
 
         let info = await getDeviceInfo()
-        let propsDict: [String: AnyCodable]? = properties?.dictionary.mapValues { AnyCodable($0) }
+        let mergedProperties = buildProperties(properties: properties?.dictionary, info: info)
+        let propsDict: [String: AnyCodable]? = mergedProperties?.mapValues { AnyCodable($0) }
 
         return CreateDeviceRequest(
             deviceId: deviceID,
@@ -159,5 +160,25 @@ internal actor DeviceManager {
             properties: propsDict,
             disableGeolocation: !collectLocale
         )
+    }
+
+    private func buildProperties(
+        properties: [String: Any]?,
+        info: DeviceInfo
+    ) -> [String: Any]? {
+        guard collectDeviceInfo else {
+            return properties
+        }
+
+        let trimmedVersion = info.appVersion?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let appVersion = trimmedVersion, !appVersion.isEmpty else {
+            return properties
+        }
+
+        var merged: [String: Any] = ["app_version": appVersion]
+        if let properties {
+            merged.merge(properties) { _, new in new }
+        }
+        return merged
     }
 }
