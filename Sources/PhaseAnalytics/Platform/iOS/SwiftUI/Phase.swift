@@ -7,6 +7,7 @@ import SwiftUI
 ///   - content: App content (required)
 ///   - baseURL: Custom API endpoint (optional, default: "https://api.phase.sh")
 ///   - logLevel: Logging level (optional, default: `.none`)
+///   - debugData: Mark identify/events as debug data (optional, default: `false`)
 ///   - deviceInfo: Collect device metadata (optional, default: `true`)
 ///   - userLocale: Collect locale & geolocation (optional, default: `true`)
 ///
@@ -28,6 +29,7 @@ public struct Phase<Content: View>: View {
     let apiKey: String
     let baseURL: String
     let logLevel: LogLevel
+    let debugData: Bool
     let deviceInfo: Bool
     let userLocale: Bool
     let content: Content
@@ -38,6 +40,7 @@ public struct Phase<Content: View>: View {
         apiKey: String,
         baseURL: String = "https://api.phase.sh",
         logLevel: LogLevel = .none,
+        debugData: Bool = false,
         deviceInfo: Bool = true,
         userLocale: Bool = true,
         @ViewBuilder content: () -> Content
@@ -45,6 +48,7 @@ public struct Phase<Content: View>: View {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.logLevel = logLevel
+        self.debugData = debugData
         self.deviceInfo = deviceInfo
         self.userLocale = userLocale
         self.content = content()
@@ -61,6 +65,7 @@ public struct Phase<Content: View>: View {
                             apiKey: apiKey,
                             baseURL: baseURL,
                             logLevel: logLevel,
+                            debugData: debugData,
                             deviceInfo: deviceInfo,
                             userLocale: userLocale
                         )

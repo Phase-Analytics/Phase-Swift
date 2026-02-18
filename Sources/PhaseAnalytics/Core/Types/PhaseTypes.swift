@@ -40,6 +40,9 @@ public struct PhaseConfig: Sendable {
     /// Logging level (optional, default: `.none`)
     public var logLevel: LogLevel
 
+    /// Mark identify/events as debug data (optional, default: `false`)
+    public var debugData: Bool
+
     /// Collect device metadata (optional, default: `true`)
     public var deviceInfo: Bool
 
@@ -50,12 +53,14 @@ public struct PhaseConfig: Sendable {
         apiKey: String,
         baseURL: String = "https://api.phase.sh",
         logLevel: LogLevel = .none,
+        debugData: Bool = false,
         deviceInfo: Bool = true,
         userLocale: Bool = true
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.logLevel = logLevel
+        self.debugData = debugData
         self.deviceInfo = deviceInfo
         self.userLocale = userLocale
     }

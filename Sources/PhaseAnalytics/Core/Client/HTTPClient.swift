@@ -4,15 +4,17 @@ import Gzip
 internal final class HTTPClient: Sendable {
     private let apiKey: String
     private let baseURL: String
+    private let debugData: Bool
     private let session: URLSession
 
     private static let batchCompressionThreshold = 100
     private static let requestTimeoutSeconds: TimeInterval = 30
     private static let maxErrorLength = 500
 
-    init(apiKey: String, baseURL: String = "https://api.phase.sh") {
+    init(apiKey: String, baseURL: String = "https://api.phase.sh", debugData: Bool = false) {
         self.apiKey = apiKey
         self.baseURL = baseURL
+        self.debugData = debugData
 
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = Self.requestTimeoutSeconds
@@ -79,6 +81,9 @@ internal final class HTTPClient: Sendable {
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if debugData {
+            urlRequest.setValue("1", forHTTPHeaderField: "x-phase-debug-data")
+        }
         urlRequest.httpBody = jsonData
 
         if retryEnabled {
@@ -214,6 +219,9 @@ internal final class HTTPClient: Sendable {
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
         urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if debugData {
+            urlRequest.setValue("1", forHTTPHeaderField: "x-phase-debug-data")
+        }
         urlRequest.httpBody = compressed
 
         if retryEnabled {

@@ -130,6 +130,7 @@ The `Phase` view and `initialize()` method accept the following parameters:
 | `apiKey` | `String` | **Required** | Your Phase API key (starts with `phase_`) |
 | `baseURL` | `String` | `"https://api.phase.sh"` | Custom API endpoint for self-hosted deployments |
 | `logLevel` | `LogLevel` | `.none` | Console logging level (`.info`, `.warn`, `.error`, `.none`) |
+| `debugData` | `Bool` | `false` | Mark identify/events as debug data |
 | `deviceInfo` | `Bool` | `true` | Collect device metadata (model, OS version, platform, app version as `app_version`) |
 | `userLocale` | `Bool` | `true` | Collect user locale and timezone information |
 
@@ -139,6 +140,7 @@ The `Phase` view and `initialize()` method accept the following parameters:
 Phase(
     apiKey: "phase_xxx",
     logLevel: .info,
+    debugData: false,
     deviceInfo: true,
     userLocale: true
 ) {

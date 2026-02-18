@@ -47,6 +47,7 @@ public final class PhaseSDK: Sendable {
     ///   - apiKey: Phase API key (required, starts with `phase_`)
     ///   - baseURL: Custom API endpoint (optional, default: "https://api.phase.sh")
     ///   - logLevel: Logging level (optional, default: `.none`)
+    ///   - debugData: Mark identify/events as debug data (optional, default: `false`)
     ///   - deviceInfo: Collect device metadata (optional, default: `true`)
     ///   - userLocale: Collect locale & geolocation (optional, default: `true`)
     ///
@@ -60,6 +61,7 @@ public final class PhaseSDK: Sendable {
         apiKey: String,
         baseURL: String = "https://api.phase.sh",
         logLevel: LogLevel = .none,
+        debugData: Bool = false,
         deviceInfo: Bool = true,
         userLocale: Bool = true
     ) async throws {
@@ -67,6 +69,7 @@ public final class PhaseSDK: Sendable {
             apiKey: apiKey,
             baseURL: baseURL,
             logLevel: logLevel,
+            debugData: debugData,
             deviceInfo: deviceInfo,
             userLocale: userLocale
         )
@@ -159,7 +162,11 @@ public final class PhaseSDK: Sendable {
 
         logger.info("Initializing Phase SDK (baseURL: \(config.baseURL), isOnline: \(isOnline))")
 
-        let client = HTTPClient(apiKey: config.apiKey, baseURL: config.baseURL)
+        let client = HTTPClient(
+            apiKey: config.apiKey,
+            baseURL: config.baseURL,
+            debugData: config.debugData
+        )
         httpClient.withLock { $0 = client }
 
         let queue = OfflineQueue(storage: storage)
