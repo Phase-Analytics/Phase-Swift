@@ -5,6 +5,7 @@ internal actor SessionManager {
     private var pingTimer: Task<Void, Never>?
     private var isOnline = true
     private var pausedAt: Date?
+    private var startedAt: Date?
 
     private let httpClient: HTTPClient
     private let offlineQueue: OfflineQueue
@@ -60,6 +61,7 @@ internal actor SessionManager {
         }
 
         let startedAt = currentISO8601Timestamp()
+        self.startedAt = Date()
         let payload = CreateSessionRequest(
             sessionId: sessionID!,
             deviceId: deviceID,
@@ -109,6 +111,7 @@ internal actor SessionManager {
                 )
 
                 sessionID = nil
+                self.startedAt = nil
                 self.pausedAt = nil
 
                 _ = await start(isOnline: isOnline)
@@ -129,6 +132,7 @@ internal actor SessionManager {
             )
 
             sessionID = nil
+            startedAt = nil
             self.pausedAt = nil
 
             _ = await start(isOnline: isOnline)
@@ -168,6 +172,14 @@ internal actor SessionManager {
 
     private func sendPing() async {
         guard let sessionID = sessionID else {
+            return
+        }
+
+        if let startedAt, Date().timeIntervalSince(startedAt) >= Self.maxSessionAge {
+            logger.info("Session reached maximum age. Starting new session.")
+            self.sessionID = nil
+            self.startedAt = nil
+            _ = await start(isOnline: isOnline)
             return
         }
 
