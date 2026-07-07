@@ -16,7 +16,7 @@ internal actor SessionManager {
 
     private static let pingInterval: TimeInterval = 5.0
     private static let inactivityTimeout: TimeInterval = 5 * 60
-    private static let maxSessionAge: TimeInterval = 60 * 60
+    private static let maxSessionAge: TimeInterval = 2 * 60 * 60
 
     init(httpClient: HTTPClient, offlineQueue: OfflineQueue, deviceID: String, storage: StorageAdapter) {
         self.httpClient = httpClient
