@@ -176,7 +176,6 @@ public struct DeviceResponse: Codable, Sendable {
     let platform: Platform?
     let locale: String?
     let country: String?
-    let city: String?
     let firstSeen: String
 }
 
