@@ -200,6 +200,10 @@ public final class PhaseSDK: Sendable {
             getSessionID: { [weak self] in
                 guard let self = self else { return nil }
                 return await self.sessionManager.withLock({ $0 })?.getSessionID()
+            },
+            markActivity: { [weak self] in
+                guard let self = self else { return }
+                await self.sessionManager.withLock({ $0 })?.markActivity()
             }
         )
         eventManager.withLock { $0 = evtManager }

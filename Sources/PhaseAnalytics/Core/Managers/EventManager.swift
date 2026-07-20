@@ -5,17 +5,20 @@ internal actor EventManager {
     private let httpClient: HTTPClient
     private let offlineQueue: OfflineQueue
     private let getSessionID: @Sendable () async -> String?
+    private let markActivity: @Sendable () async -> Void
     private let rateLimiter = RateLimiter()
     private let deduplicator = EventDeduplicator()
 
     init(
         httpClient: HTTPClient,
         offlineQueue: OfflineQueue,
-        getSessionID: @escaping @Sendable () async -> String?
+        getSessionID: @escaping @Sendable () async -> String?,
+        markActivity: @escaping @Sendable () async -> Void = {}
     ) {
         self.httpClient = httpClient
         self.offlineQueue = offlineQueue
         self.getSessionID = getSessionID
+        self.markActivity = markActivity
     }
 
     func updateNetworkState(isOnline: Bool) {
@@ -71,7 +74,10 @@ internal actor EventManager {
             if case .failure(let error) = result {
                 logger.error("Event tracking failed. Queuing for retry.", error)
                 await offlineQueue.enqueue(.event(payload: payload, clientOrder: 0, retryCount: nil))
+                return
             }
+
+            await markActivity()
         } else {
             await offlineQueue.enqueue(.event(payload: payload, clientOrder: 0, retryCount: nil))
         }

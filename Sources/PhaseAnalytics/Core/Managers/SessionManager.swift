@@ -2,7 +2,7 @@ import Foundation
 
 internal actor SessionManager {
     private var sessionID: String?
-    private var pingTimer: Task<Void, Never>?
+    private var heartbeatTask: Task<Void, Never>?
     private var isOnline = true
     private var pausedAt: Date?
     private var startedAt: Date?
@@ -14,7 +14,15 @@ internal actor SessionManager {
 
     private var startPromise: Task<String, Never>?
 
-    private static let pingInterval: TimeInterval = 5.0
+    private static let initialHeartbeatInterval: TimeInterval = 5.0
+    private static let earlyHeartbeatInterval: TimeInterval = 10.0
+    private static let standardHeartbeatInterval: TimeInterval = 15.0
+    private static let extendedHeartbeatInterval: TimeInterval = 20.0
+    private static let longHeartbeatInterval: TimeInterval = 30.0
+    private static let earlyHeartbeatAt: TimeInterval = 15.0
+    private static let standardHeartbeatAt: TimeInterval = 65.0
+    private static let extendedHeartbeatAt: TimeInterval = 3 * 60
+    private static let longHeartbeatAt: TimeInterval = 5 * 60
     private static let inactivityTimeout: TimeInterval = 5 * 60
     private static let maxSessionAge: TimeInterval = 2 * 60 * 60
 
@@ -151,23 +159,56 @@ internal actor SessionManager {
         self.isOnline = isOnline
     }
 
+    func markActivity() {
+        guard pausedAt == nil else { return }
+        startPingInterval()
+    }
+
     private func startPingInterval() {
         stopPingInterval()
 
-        pingTimer = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(Self.pingInterval * 1_000_000_000))
+        let interval = heartbeatInterval()
+        heartbeatTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            } catch {
+                return
+            }
 
-                if !Task.isCancelled {
-                    await sendPing()
-                }
+            guard !Task.isCancelled else { return }
+            await sendPing()
+
+            if !Task.isCancelled {
+                startPingInterval()
             }
         }
     }
 
     private func stopPingInterval() {
-        pingTimer?.cancel()
-        pingTimer = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+    }
+
+    private func heartbeatInterval() -> TimeInterval {
+        let sessionAge = startedAt.map { Date().timeIntervalSince($0) } ?? 0
+
+        if sessionAge >= Self.longHeartbeatAt {
+            return Self.longHeartbeatInterval
+        }
+
+        if sessionAge >= Self.extendedHeartbeatAt {
+            return Self.extendedHeartbeatInterval
+        }
+
+        if sessionAge >= Self.standardHeartbeatAt {
+            return Self.standardHeartbeatInterval
+        }
+
+        if sessionAge >= Self.earlyHeartbeatAt {
+            return Self.earlyHeartbeatInterval
+        }
+
+        return Self.initialHeartbeatInterval
     }
 
     private func sendPing() async {
