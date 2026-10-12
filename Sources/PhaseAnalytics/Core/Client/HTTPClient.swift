@@ -1,14 +1,61 @@
 import Foundation
 import Gzip
 
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
+
+internal struct HTTPResponse: Sendable {
+    let statusCode: Int
+    let data: Data
+    let retryAfter: TimeInterval?
+}
+
+internal struct HTTPFailure: Error, Sendable {
+    let error: PhaseError
+    let statusCode: Int?
+    let retryAfter: TimeInterval?
+    let isRetryable: Bool
+    let isCancelled: Bool
+
+    static func transport(_ error: Error) -> HTTPFailure {
+        let isCancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
+        return HTTPFailure(
+            error: .networkError(error.localizedDescription),
+            statusCode: nil,
+            retryAfter: nil,
+            isRetryable: true,
+            isCancelled: isCancelled
+        )
+    }
+
+    static func status(_ response: HTTPResponse, message: String) -> HTTPFailure {
+        let httpError = HTTPError(statusCode: response.statusCode, message: message)
+        return HTTPFailure(
+            error: .httpError(statusCode: response.statusCode, message: message),
+            statusCode: response.statusCode,
+            retryAfter: response.retryAfter,
+            isRetryable: httpError.isRetryable(),
+            isCancelled: false
+        )
+    }
+
+    static let encoding = HTTPFailure(
+        error: .encodingError, statusCode: nil, retryAfter: nil, isRetryable: false, isCancelled: false)
+}
+
+/// Single-attempt transport for `/sdk/batch`. Retries are owned by `BatchSender`, so a request
+/// never outlives the flush that issued it and retries never overlap.
 internal final class HTTPClient: Sendable {
     private let apiKey: String
     private let baseURL: String
     private let debugData: Bool
     private let session: URLSession
 
-    private static let batchCompressionThreshold = 100
-    private static let requestTimeoutSeconds: TimeInterval = 30
+    private static let compressionThresholdBytes = 1024
+    private static let requestTimeoutSeconds: TimeInterval = 15
+    private static let resourceTimeoutSeconds: TimeInterval = 30
+    private static let maxRetryAfterSeconds: TimeInterval = 600
     private static let maxErrorLength = 500
 
     init(apiKey: String, baseURL: String = "https://api.phase.sh", debugData: Bool = false) {
@@ -18,63 +65,57 @@ internal final class HTTPClient: Sendable {
 
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = Self.requestTimeoutSeconds
-        config.timeoutIntervalForResource = Self.requestTimeoutSeconds
+        config.timeoutIntervalForResource = Self.resourceTimeoutSeconds
         self.session = URLSession(configuration: config)
     }
 
     private func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
+        encoder.userInfo[.phaseWireFormat] = true
         return encoder
     }
 
-    private func makeDecoder() -> JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
+    /// Returns any HTTP response as success so the caller can apply per-item results (200/207/4xx).
+    func sendBatch(_ payload: BatchRequest) async -> Result<HTTPResponse, HTTPFailure> {
+        await post(endpoint: "/sdk/batch", body: payload, compressible: true)
     }
 
-    func createDevice(_ payload: CreateDeviceRequest) async -> Result<DeviceResponse, PhaseError> {
-        await request(endpoint: "/sdk/devices", body: payload, operationName: "CreateDevice")
+    func decodeBatchResponse(_ data: Data) -> BatchResponse? {
+        guard !data.isEmpty else { return nil }
+        return try? JSONDecoder().decode(BatchResponse.self, from: data)
     }
 
-    func createSession(_ payload: CreateSessionRequest) async -> Result<SessionResponse, PhaseError> {
-        await request(endpoint: "/sdk/sessions", body: payload, operationName: "CreateSession")
-    }
-
-    func createEvent(_ payload: CreateEventRequest) async -> Result<EventResponse, PhaseError> {
-        await request(endpoint: "/sdk/events", body: payload, operationName: "CreateEvent")
-    }
-
-    func pingSession(_ payload: PingSessionRequest) async -> Result<PingSessionResponse, PhaseError> {
-        await request(endpoint: "/sdk/ping", body: payload, operationName: "PingSession")
-    }
-
-    func sendBatch(_ payload: BatchRequest) async -> Result<BatchResponse, PhaseError> {
-        let shouldCompress = payload.items.count >= Self.batchCompressionThreshold
-
-        if shouldCompress {
-            return await requestCompressed(endpoint: "/sdk/batch", body: payload, operationName: "SendBatch")
+    func errorMessage(_ response: HTTPResponse) -> String {
+        let text = String(data: response.data, encoding: .utf8) ?? "Unknown error"
+        if text.count > Self.maxErrorLength {
+            return String(text.prefix(Self.maxErrorLength)) + "... (truncated)"
         }
-
-        return await request(endpoint: "/sdk/batch", body: payload, operationName: "SendBatch")
+        return text
     }
 
-    private func request<T: Codable & Sendable, U: Codable & Sendable>(
+    private func post<T: Encodable & Sendable>(
         endpoint: String,
         body: T,
-        operationName: String,
-        retryEnabled: Bool = true
-    ) async -> Result<U, PhaseError> {
-        let jsonData: Data
+        compressible: Bool
+    ) async -> Result<HTTPResponse, HTTPFailure> {
+        var bodyData: Data
         do {
-            jsonData = try makeEncoder().encode(body)
+            bodyData = try makeEncoder().encode(body)
         } catch {
-            return .failure(.encodingError)
+            logger.error("Failed to encode \(endpoint) request body", error)
+            return .failure(.encoding)
         }
 
         guard let url = URL(string: baseURL + endpoint) else {
-            return .failure(.networkError("Invalid URL: \(baseURL + endpoint)"))
+            return .failure(
+                HTTPFailure(
+                    error: .networkError("Invalid URL: \(baseURL + endpoint)"),
+                    statusCode: nil,
+                    retryAfter: nil,
+                    isRetryable: false,
+                    isCancelled: false
+                ))
         }
 
         var urlRequest = URLRequest(url: url)
@@ -84,157 +125,47 @@ internal final class HTTPClient: Sendable {
         if debugData {
             urlRequest.setValue("1", forHTTPHeaderField: "x-phase-debug-data")
         }
-        urlRequest.httpBody = jsonData
 
-        if retryEnabled {
-            return await executeWithRetry(urlRequest: urlRequest, operationName: operationName)
+        if compressible, bodyData.count >= Self.compressionThresholdBytes, let compressed = try? bodyData.gzipped() {
+            bodyData = compressed
+            urlRequest.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
         }
+        urlRequest.httpBody = bodyData
 
-        return await executeSingle(urlRequest: urlRequest, operationName: operationName)
-    }
-
-    private func executeSingle<U: Codable & Sendable>(
-        urlRequest: URLRequest,
-        operationName: String
-    ) async -> Result<U, PhaseError> {
         do {
             let (data, response) = try await session.data(for: urlRequest)
-
             guard let httpResponse = response as? HTTPURLResponse else {
-                return .failure(.networkError("Invalid server response"))
+                return .failure(.transport(URLError(.badServerResponse)))
             }
-
-            guard httpResponse.statusCode == 200 else {
-                let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-                let sanitized = sanitizeError(errorMessage)
-                logger.error("\(operationName) failed with HTTP \(httpResponse.statusCode): \(sanitized)")
-                return .failure(.httpError(statusCode: httpResponse.statusCode, message: sanitized))
-            }
-
-            guard !data.isEmpty else {
-                logger.error("\(operationName) failed. Server returned empty response.")
-                return .failure(
-                    .httpError(
-                        statusCode: httpResponse.statusCode,
-                        message: "Server returned empty response body"
-                    ))
-            }
-
-            let result = try makeDecoder().decode(U.self, from: data)
-            return .success(result)
-
-        } catch let error as PhaseError {
-            return .failure(error)
+            return .success(
+                HTTPResponse(
+                    statusCode: httpResponse.statusCode,
+                    data: data,
+                    retryAfter: Self.parseRetryAfter(httpResponse.value(forHTTPHeaderField: "Retry-After"))
+                ))
         } catch {
-            logger.error("\(operationName) failed. Check network connection.", error)
-            return .failure(.networkError(error.localizedDescription))
+            return .failure(.transport(error))
         }
     }
 
-    private func executeWithRetry<U: Codable & Sendable>(
-        urlRequest: URLRequest,
-        operationName: String
-    ) async -> Result<U, PhaseError> {
-        let retryDelays: [TimeInterval] = [0.1, 0.5, 2.0]
-        var lastError: Error?
-
-        for (attempt, delay) in ([0.0] + retryDelays).enumerated() {
-            if Task.isCancelled {
-                return .failure(.networkError("Request cancelled"))
-            }
-
-            if attempt > 0 {
-                do {
-                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                } catch {
-                    return .failure(.networkError("Request cancelled"))
-                }
-            }
-
-            do {
-                let (data, response) = try await session.data(for: urlRequest)
-
-                guard let httpResponse = response as? HTTPURLResponse else {
-                    throw URLError(.badServerResponse)
-                }
-
-                guard httpResponse.statusCode == 200 else {
-                    let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-                    let sanitized = sanitizeError(errorMessage)
-                    throw HTTPError(statusCode: httpResponse.statusCode, message: sanitized)
-                }
-
-                guard !data.isEmpty else {
-                    throw HTTPError(
-                        statusCode: httpResponse.statusCode,
-                        message: "Server returned empty response body"
-                    )
-                }
-
-                let result = try makeDecoder().decode(U.self, from: data)
-                return .success(result)
-
-            } catch let error as HTTPError {
-                lastError = error
-                if !error.isRetryable() {
-                    logger.error("\(operationName) failed with HTTP \(error.statusCode). Not retryable: \(error.message)")
-                    return .failure(.httpError(statusCode: error.statusCode, message: error.message))
-                }
-            } catch is CancellationError {
-                return .failure(.networkError("Request cancelled"))
-            } catch {
-                lastError = error
-            }
+    /// Retry-After is either delta-seconds or an HTTP-date (RFC 9110 §10.2.3).
+    private static func parseRetryAfter(_ value: String?) -> TimeInterval? {
+        guard let value = value?.trimmingCharacters(in: .whitespaces), !value.isEmpty else {
+            return nil
         }
 
-        logger.error("\(operationName) failed after \(retryDelays.count + 1) attempts. Check network connection.")
-        let errorMessage = lastError?.localizedDescription ?? "Unknown network error"
-        return .failure(.networkError(errorMessage))
-    }
-
-    private func requestCompressed<T: Codable & Sendable, U: Codable & Sendable>(
-        endpoint: String,
-        body: T,
-        operationName: String,
-        retryEnabled: Bool = true
-    ) async -> Result<U, PhaseError> {
-        let jsonData: Data
-        do {
-            jsonData = try makeEncoder().encode(body)
-        } catch {
-            return .failure(.encodingError)
+        let seconds: TimeInterval?
+        if let delta = TimeInterval(value) {
+            seconds = delta
+        } else {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(identifier: "GMT")
+            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+            seconds = formatter.date(from: value).map { $0.timeIntervalSinceNow }
         }
 
-        guard let compressed = try? jsonData.gzipped() else {
-            logger.error("\(operationName) failed. Could not compress request data.")
-            return .failure(.encodingError)
-        }
-
-        guard let url = URL(string: baseURL + endpoint) else {
-            return .failure(.networkError("Invalid URL: \(baseURL + endpoint)"))
-        }
-
-        var urlRequest = URLRequest(url: url)
-        urlRequest.httpMethod = "POST"
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
-        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        if debugData {
-            urlRequest.setValue("1", forHTTPHeaderField: "x-phase-debug-data")
-        }
-        urlRequest.httpBody = compressed
-
-        if retryEnabled {
-            return await executeWithRetry(urlRequest: urlRequest, operationName: operationName)
-        }
-
-        return await executeSingle(urlRequest: urlRequest, operationName: operationName)
-    }
-
-    private func sanitizeError(_ errorText: String) -> String {
-        if errorText.count > Self.maxErrorLength {
-            return String(errorText.prefix(Self.maxErrorLength)) + "... (truncated)"
-        }
-        return errorText
+        guard let seconds, seconds.isFinite else { return nil }
+        return min(max(seconds, 0), maxRetryAfterSeconds)
     }
 }

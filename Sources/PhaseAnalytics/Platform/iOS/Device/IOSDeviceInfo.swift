@@ -37,8 +37,8 @@ import Foundation
         return UIDevice.current.systemVersion
     }
 
-    private func getLocale() -> String {
-        return Locale.current.identifier
+    private func getLocale() -> String? {
+        return languageTag(fromLocaleIdentifier: Locale.current.identifier)
     }
 
     @MainActor

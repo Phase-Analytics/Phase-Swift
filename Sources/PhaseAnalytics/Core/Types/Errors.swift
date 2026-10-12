@@ -41,6 +41,14 @@ public enum PhaseError: Error, Sendable {
     }
 }
 
+// Without this, `error.localizedDescription` on an `any Error` ignores the property above and
+// logs a generic Foundation message.
+extension PhaseError: LocalizedError {
+    public var errorDescription: String? {
+        localizedDescription
+    }
+}
+
 public final class HTTPError: Error, Sendable {
     public let statusCode: Int
     public let message: String
@@ -51,6 +59,6 @@ public final class HTTPError: Error, Sendable {
     }
 
     public func isRetryable() -> Bool {
-        return statusCode >= 500 && statusCode < 600
+        return statusCode == 408 || statusCode == 429 || (statusCode >= 500 && statusCode < 600)
     }
 }

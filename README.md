@@ -20,7 +20,7 @@ Privacy-first mobile analytics for iOS and macOS applications.
 
 - iOS 15.0+ or macOS 12.0+
 - Swift 6.0+
-- Xcode 15.0+
+- Xcode 16.0+ (the package uses `swift-tools-version: 6.0`)
 
 ## Installation
 
@@ -31,7 +31,7 @@ Add Phase Analytics to your project using Swift Package Manager:
 #### In Xcode:
 
 1. Go to **File → Add Package Dependencies**
-2. Enter the repository URL: `https://github.com/Phase-Analytics/Phase`
+2. Enter the repository URL: `https://github.com/Phase-Analytics/Phase-Swift`
 3. Select the latest version
 4. Add to your target
 
@@ -49,7 +49,7 @@ Then add it to your target dependencies:
 .target(
     name: "YourTarget",
     dependencies: [
-        .product(name: "PhaseAnalytics", package: "Phase")
+        .product(name: "PhaseAnalytics", package: "Phase-Swift")
     ]
 )
 ```
@@ -132,7 +132,7 @@ The `Phase` view and `initialize()` method accept the following parameters:
 | `logLevel` | `LogLevel` | `.none` | Console logging level (`.info`, `.warn`, `.error`, `.none`) |
 | `debugData` | `Bool` | `false` | Mark identify/events as debug data |
 | `deviceInfo` | `Bool` | `true` | Collect device metadata (model, OS version, platform, app version as `app_version`) |
-| `userLocale` | `Bool` | `true` | Collect user locale and timezone information |
+| `userLocale` | `Bool` | `true` | Collect the user locale (as a BCP 47 tag such as `en-US`) and resolve country from IP |
 
 ### Example with Configuration
 
@@ -152,7 +152,9 @@ Phase(
 
 ### `identify(_:)`
 
-Register the device and start a session. Must be called before tracking events.
+Register the device and start a session. Events tracked earlier (even before `initialize()`) are kept, up to 200 events for up to an hour, with their original timestamps, and sent once `identify()` runs. Calling `identify()` before `initialize()` finishes is fine too: it runs right after initialization.
+
+Custom properties must be flat (`String`, `Int`, `Double`, `Bool`, `nil`), keys up to 128 characters. Invalid properties are logged and left out; the device is still identified.
 
 ```swift
 // Basic usage - no PII collected
@@ -185,6 +187,8 @@ track("purchase_completed", [
 PhaseSDK.shared.track("button_clicked", params: ["button_id": "submit"])
 ```
 
+Params allow up to 32 keys (keys up to 32 characters), string values up to 256 characters and 8 KB in total. `NaN` and infinite numbers are rejected. Each event gets a unique ID when it is tracked, so retries never create duplicates.
+
 ### `trackScreen(_:params:)`
 
 Manually track screen views.
@@ -195,6 +199,25 @@ trackScreen("/profile", ["user_id": "123"])
 
 // Instance method
 PhaseSDK.shared.trackScreen("/settings", params: nil)
+```
+
+Screen names follow the event naming rules below. Send IDs as they are (`/users/42`); the server groups numeric segments into `/users/:id`.
+
+### `flush()`
+
+Send queued data now, e.g. before a test assertion or a known shutdown. Returns when the attempt finishes. While offline or while the server asks the SDK to back off, data stays queued and is retried automatically.
+
+```swift
+await PhaseSDK.shared.flush()
+```
+
+### `reset()`
+
+Forget the current device, e.g. on logout. Ends the session, tries to deliver queued data, discards what could not be sent and generates a new device ID. Call `identify()` again to start tracking the new device.
+
+```swift
+await PhaseSDK.shared.reset()
+await PhaseSDK.shared.identify()
 ```
 
 ### `.phaseScreen(_:params:)` Modifier
@@ -214,7 +237,7 @@ struct ProfileView: View {
 }
 ```
 
-Screen names are normalized automatically (e.g., `"ProfileView"` → `"/profile-view"`).
+Screen names are normalized automatically (e.g., `"ProfileView"` → `"/profile-view"`; query strings are removed and unsupported characters become `-`). A screen view is tracked each time the view appears, including when navigating back to it.
 
 ## Documentation
 
@@ -243,25 +266,21 @@ Phase Analytics is designed with privacy as a core principle:
 
 ## How It Works
 
-### Offline Support
+### Delivery
 
-Events are queued locally using `UserDefaults` when offline. The queue automatically syncs when connection is restored.
-
-### Performance
-
-- Offline events are batched and sent asynchronously
-- Network state is monitored automatically
-- Failed requests retry with exponential backoff
-- Maximum batch size: 1000 events
-- Thread-safe with Swift 6 concurrency
+- Everything goes through a persistent queue (stored in `UserDefaults`, up to 1000 items) and is sent in batches of up to 50 items: when 20 items are waiting, every 10 seconds while the queue is not empty, when the app moves to the background (inside a background task) and when connectivity returns.
+- Items leave the queue only after the server answers. Items the server rejects permanently are dropped; items that failed for a transient reason are retried up to 5 times.
+- Failed requests back off exponentially with jitter (up to 5 minutes) and honor `Retry-After` on `429`/`503`. Requests time out after 15 seconds.
+- Session heartbeats are coalesced to one pending heartbeat per session.
+- Thread-safe with Swift 6 concurrency.
 
 ### Type Safety
 
-All parameters must be primitives: `String`, `Int`, `Double`, `Bool`, or `nil`.
+All parameters must be primitives: `String`, `Int`, `Double`, `Bool`, or `nil`. Invalid events are logged and dropped at the call site.
 
 ## Event Naming Rules
 
-- Alphanumeric characters, underscores (`_`), hyphens (`-`), periods (`.`), forward slashes (`/`), and spaces
+- ASCII letters and digits, underscores (`_`), hyphens (`-`), periods (`.`), forward slashes (`/`), and spaces
 - 1-256 characters
 - Examples: `purchase`, `user.signup`, `payment/success`, `Button Clicked`
 

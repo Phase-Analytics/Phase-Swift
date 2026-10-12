@@ -82,18 +82,24 @@ public struct PhaseScreenModifier: ViewModifier {
     let screenName: String
     let params: [String: Any]?
 
-    @State private var hasAppeared = false
+    /// SwiftUI can call `onAppear` more than once per appearance; pairing it with `onDisappear`
+    /// counts each real visit (including navigating back) exactly once.
+    @State private var isVisible = false
 
     public func body(content: Content) -> some View {
-        content.onAppear {
-            guard !hasAppeared else { return }
-            hasAppeared = true
+        content
+            .onAppear {
+                guard !isVisible else { return }
+                isVisible = true
 
-            let formattedName = PhaseSDK.formatScreenName(screenName)
-            let eventParams = params.map { EventParams($0) }
+                let formattedName = PhaseSDK.formatScreenName(screenName)
+                let eventParams = params.map { EventParams($0) }
 
-            PhaseSDK.shared.trackScreen(formattedName, params: eventParams)
-        }
+                PhaseSDK.shared.trackScreen(formattedName, params: eventParams)
+            }
+            .onDisappear {
+                isVisible = false
+            }
     }
 }
 
@@ -101,7 +107,7 @@ extension View {
     /// Track screen view when this view appears
     ///
     /// - Parameters:
-    ///   - name: Screen name (required, e.g. "HomeView" → "/home-view")
+    ///   - name: Screen name (required, e.g. "HomeView" → "/home-view"; tracked on every appearance)
     ///   - params: Additional parameters (optional, primitives only)
     ///
     /// ## Example

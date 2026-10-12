@@ -1,18 +1,21 @@
 import Foundation
 
+internal struct SessionSnapshot: Sendable {
+    let id: String
+    /// Wall-clock start sent to the server; events must not be timestamped before it.
+    let startedAt: Date
+}
+
 internal actor SessionManager {
-    private var sessionID: String?
+    private var session: SessionSnapshot?
+    private var startedAtUptime: TimeInterval?
+    private var pausedAtUptime: TimeInterval?
+    private var isPaused = false
+    private var lastLifecycleSequence = 0
     private var heartbeatTask: Task<Void, Never>?
-    private var isOnline = true
-    private var pausedAt: Date?
-    private var startedAt: Date?
 
-    private let httpClient: HTTPClient
-    private let offlineQueue: OfflineQueue
-    private let deviceID: String
-    private let storage: StorageAdapter
-
-    private var startPromise: Task<String, Never>?
+    private let sender: BatchSender
+    private var deviceID: String
 
     private static let initialHeartbeatInterval: TimeInterval = 5.0
     private static let earlyHeartbeatInterval: TimeInterval = 10.0
@@ -26,146 +29,120 @@ internal actor SessionManager {
     private static let inactivityTimeout: TimeInterval = 5 * 60
     private static let maxSessionAge: TimeInterval = 2 * 60 * 60
 
-    init(httpClient: HTTPClient, offlineQueue: OfflineQueue, deviceID: String, storage: StorageAdapter) {
-        self.httpClient = httpClient
-        self.offlineQueue = offlineQueue
+    init(sender: BatchSender, deviceID: String) {
+        self.sender = sender
         self.deviceID = deviceID
-        self.storage = storage
     }
 
-    func start(isOnline: Bool) async -> String {
-        if let promise = startPromise {
-            return await promise.value
+    /// Starts a session unless one is active.
+    ///
+    /// - Parameter earliestActivity: Timestamp of the oldest event captured before the session
+    ///   existed. The session is backdated to it so those events keep their real timestamps.
+    @discardableResult
+    func start(earliestActivity: Date? = nil) async -> SessionSnapshot {
+        if let session {
+            return session
         }
 
-        if let existingID = sessionID {
-            return existingID
-        }
+        let now = Date()
+        let startedAt = min(earliestActivity ?? now, now)
 
-        let promise = Task<String, Never> {
-            await doStart(isOnline: isOnline)
-        }
-        startPromise = promise
+        // State is set before the first suspension so concurrent callers reuse this session.
+        let snapshot = SessionSnapshot(id: IDGenerator.generateSessionID(), startedAt: startedAt)
+        session = snapshot
+        startedAtUptime = monotonicNow() - now.timeIntervalSince(startedAt)
 
-        let result = await promise.value
-        startPromise = nil
-        return result
-    }
-
-    private func doStart(isOnline: Bool) async -> String {
-        stopPingInterval()
-
-        self.isOnline = isOnline
-        sessionID = IDGenerator.generateSessionID()
-
-        if case .failure = Validator.validateSessionID(sessionID!) {
-            logger.error("Generated session ID invalid. Retrying.")
-            sessionID = IDGenerator.generateSessionID()
-
-            if case .failure = Validator.validateSessionID(sessionID!) {
-                logger.error("Failed to generate valid session ID. Using fallback.")
-                sessionID = UUID().uuidString
-            }
-        }
-
-        let startedAt = currentISO8601Timestamp()
-        self.startedAt = Date()
         let payload = CreateSessionRequest(
-            sessionId: sessionID!,
+            sessionId: snapshot.id,
             deviceId: deviceID,
-            startedAt: startedAt
+            startedAt: iso8601Timestamp(snapshot.startedAt)
         )
-
-        let persistResult = await storage.setItem(key: StorageKeys.sessionStartedAt, value: startedAt)
-        if case .failure = persistResult {
-            logger.warn("Failed to persist session start time. Session age checks may not work correctly.")
-        }
-
-        if isOnline {
-            let result = await httpClient.createSession(payload)
-            if case .failure(let error) = result {
-                logger.error("Session creation failed. Queuing for retry.", error)
-                await offlineQueue.enqueue(.session(payload: payload, clientOrder: 0, retryCount: nil))
-            }
-        } else {
-            await offlineQueue.enqueue(.session(payload: payload, clientOrder: 0, retryCount: nil))
-        }
+        await sender.enqueue(.session(payload: payload, clientOrder: 0, retryCount: nil))
 
         startPingInterval()
-
-        return sessionID!
+        return snapshot
     }
 
-    func pause() {
-        pausedAt = Date()
+    /// Current session, rotated first if it reached the server's maximum duration.
+    func currentSession() async -> SessionSnapshot? {
+        guard session != nil else { return nil }
+        if sessionAge() >= Self.maxSessionAge {
+            logger.info("Session reached maximum age. Starting new session.")
+            return await rotate()
+        }
+        return session
+    }
+
+    /// Ends the current session without starting another.
+    func end() {
+        stopPingInterval()
+        session = nil
+        startedAtUptime = nil
+        pausedAtUptime = nil
+    }
+
+    /// Ends the session and switches identity; the next `start()` uses the new device.
+    func reset(deviceID: String) {
+        end()
+        self.deviceID = deviceID
+    }
+
+    /// Lifecycle transitions carry a sequence number captured when the notification fired, so
+    /// out-of-order delivery of the async calls cannot leave the session in the wrong state.
+    func pause(sequence: Int) {
+        guard sequence > lastLifecycleSequence else { return }
+        lastLifecycleSequence = sequence
+        guard !isPaused else { return }
+
+        isPaused = true
+        pausedAtUptime = monotonicNow()
         stopPingInterval()
         logger.info("Session paused")
     }
 
-    func resume() async {
-        guard sessionID != nil else {
-            return
-        }
+    func resume(sequence: Int) async {
+        guard sequence > lastLifecycleSequence else { return }
+        lastLifecycleSequence = sequence
+        guard isPaused else { return }
 
-        let sessionStartedResult = await storage.getItem(key: StorageKeys.sessionStartedAt) as Result<String?, Error>
-        if case .success(let startedAtString) = sessionStartedResult,
-           let startedAtString = startedAtString,
-           let startedAtDate = ISO8601DateFormatter().date(from: startedAtString) {
-            let sessionAge = Date().timeIntervalSince(startedAtDate)
+        isPaused = false
+        let pausedAt = pausedAtUptime
+        pausedAtUptime = nil
 
-            if sessionAge > Self.maxSessionAge {
-                logger.info(
-                    "Session too old (\(Int(sessionAge))s). Starting new session."
-                )
+        guard session != nil else { return }
 
-                sessionID = nil
-                self.startedAt = nil
-                self.pausedAt = nil
-
-                _ = await start(isOnline: isOnline)
-                return
-            }
-        }
-
-        guard let pausedAt = pausedAt else {
-            startPingInterval()
-            return
-        }
-
-        let inactiveDuration = Date().timeIntervalSince(pausedAt)
-
-        if inactiveDuration > Self.inactivityTimeout {
-            logger.info(
-                "Session inactive for \(Int(inactiveDuration))s. Starting new session."
-            )
-
-            sessionID = nil
-            startedAt = nil
-            self.pausedAt = nil
-
-            _ = await start(isOnline: isOnline)
+        let inactiveDuration = pausedAt.map { monotonicNow() - $0 } ?? 0
+        if sessionAge() >= Self.maxSessionAge {
+            logger.info("Session too old (\(Int(sessionAge()))s). Starting new session.")
+            await rotate()
+        } else if inactiveDuration > Self.inactivityTimeout {
+            logger.info("Session inactive for \(Int(inactiveDuration))s. Starting new session.")
+            await rotate()
         } else {
-            self.pausedAt = nil
             startPingInterval()
             logger.info("Session resumed after \(Int(inactiveDuration))s")
         }
     }
 
-    func getSessionID() -> String? {
-        return sessionID
-    }
-
-    func updateNetworkState(isOnline: Bool) {
-        self.isOnline = isOnline
-    }
-
+    /// Called after the server accepted activity, which already refreshed the session.
     func markActivity() {
-        guard pausedAt == nil else { return }
+        guard !isPaused, session != nil else { return }
         startPingInterval()
+    }
+
+    @discardableResult
+    private func rotate() async -> SessionSnapshot {
+        end()
+        return await start()
+    }
+
+    private func sessionAge() -> TimeInterval {
+        return startedAtUptime.map { monotonicNow() - $0 } ?? 0
     }
 
     private func startPingInterval() {
         stopPingInterval()
+        guard !isPaused else { return }
 
         let interval = heartbeatInterval()
         heartbeatTask = Task {
@@ -190,21 +167,21 @@ internal actor SessionManager {
     }
 
     private func heartbeatInterval() -> TimeInterval {
-        let sessionAge = startedAt.map { Date().timeIntervalSince($0) } ?? 0
+        let age = sessionAge()
 
-        if sessionAge >= Self.longHeartbeatAt {
+        if age >= Self.longHeartbeatAt {
             return Self.longHeartbeatInterval
         }
 
-        if sessionAge >= Self.extendedHeartbeatAt {
+        if age >= Self.extendedHeartbeatAt {
             return Self.extendedHeartbeatInterval
         }
 
-        if sessionAge >= Self.standardHeartbeatAt {
+        if age >= Self.standardHeartbeatAt {
             return Self.standardHeartbeatInterval
         }
 
-        if sessionAge >= Self.earlyHeartbeatAt {
+        if age >= Self.earlyHeartbeatAt {
             return Self.earlyHeartbeatInterval
         }
 
@@ -212,31 +189,15 @@ internal actor SessionManager {
     }
 
     private func sendPing() async {
-        guard let sessionID = sessionID else {
-            return
-        }
+        guard let current = session, !isPaused else { return }
 
-        if let startedAt, Date().timeIntervalSince(startedAt) >= Self.maxSessionAge {
+        if sessionAge() >= Self.maxSessionAge {
             logger.info("Session reached maximum age. Starting new session.")
-            self.sessionID = nil
-            self.startedAt = nil
-            _ = await start(isOnline: isOnline)
+            await rotate()
             return
         }
 
-        let payload = PingSessionRequest(
-            sessionId: sessionID,
-            timestamp: currentISO8601Timestamp()
-        )
-
-        if isOnline {
-            let result = await httpClient.pingSession(payload)
-            if case .failure(let error) = result {
-                logger.error("Session ping failed. Queuing for retry.", error)
-                await offlineQueue.enqueue(.ping(payload: payload, clientOrder: 0, retryCount: nil))
-            }
-        } else {
-            await offlineQueue.enqueue(.ping(payload: payload, clientOrder: 0, retryCount: nil))
-        }
+        let payload = PingSessionRequest(sessionId: current.id, timestamp: currentISO8601Timestamp())
+        await sender.enqueuePing(payload)
     }
 }

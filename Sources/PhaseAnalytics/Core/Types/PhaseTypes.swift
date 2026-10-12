@@ -162,6 +162,8 @@ public struct CreateEventRequest: Codable, Sendable {
     let params: [String: AnyCodable]?
     let isScreen: Bool
     let timestamp: String
+    /// Client-generated ULID, stable across retries so the server can deduplicate.
+    let eventId: String?
 }
 
 public struct PingSessionRequest: Codable, Sendable {
@@ -233,6 +235,33 @@ public enum BatchItem: Sendable {
         case .ping: return "ping"
         }
     }
+
+    /// Device the item is bound to; events and pings are bound through their session.
+    var deviceId: String? {
+        switch self {
+        case .device(let payload, _, _): return payload.deviceId
+        case .session(let payload, _, _): return payload.deviceId
+        case .event, .ping: return nil
+        }
+    }
+
+    func with(clientOrder: Int, retryCount: Int?) -> BatchItem {
+        switch self {
+        case .device(let payload, _, _):
+            return .device(payload: payload, clientOrder: clientOrder, retryCount: retryCount)
+        case .session(let payload, _, _):
+            return .session(payload: payload, clientOrder: clientOrder, retryCount: retryCount)
+        case .event(let payload, _, _):
+            return .event(payload: payload, clientOrder: clientOrder, retryCount: retryCount)
+        case .ping(let payload, _, _):
+            return .ping(payload: payload, clientOrder: clientOrder, retryCount: retryCount)
+        }
+    }
+}
+
+extension CodingUserInfoKey {
+    /// Set on encoders producing request bodies; local-only fields (retryCount) are omitted.
+    static let phaseWireFormat = CodingUserInfoKey(rawValue: "phase.wireFormat")!
 }
 
 extension BatchItem: Codable {
@@ -270,24 +299,23 @@ extension BatchItem: Codable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(clientOrder, forKey: .clientOrder)
 
         switch self {
-        case .device(let payload, let clientOrder, _):
-            try container.encode("device", forKey: .type)
+        case .device(let payload, _, _):
             try container.encode(payload, forKey: .payload)
-            try container.encode(clientOrder, forKey: .clientOrder)
-        case .session(let payload, let clientOrder, _):
-            try container.encode("session", forKey: .type)
+        case .session(let payload, _, _):
             try container.encode(payload, forKey: .payload)
-            try container.encode(clientOrder, forKey: .clientOrder)
-        case .event(let payload, let clientOrder, _):
-            try container.encode("event", forKey: .type)
+        case .event(let payload, _, _):
             try container.encode(payload, forKey: .payload)
-            try container.encode(clientOrder, forKey: .clientOrder)
-        case .ping(let payload, let clientOrder, _):
-            try container.encode("ping", forKey: .type)
+        case .ping(let payload, _, _):
             try container.encode(payload, forKey: .payload)
-            try container.encode(clientOrder, forKey: .clientOrder)
+        }
+
+        let isWireFormat = encoder.userInfo[.phaseWireFormat] as? Bool ?? false
+        if !isWireFormat {
+            try container.encodeIfPresent(retryCount, forKey: .retryCount)
         }
     }
 }
@@ -300,6 +328,8 @@ public struct BatchError: Codable, Sendable {
     let clientOrder: Int?
     let code: String
     let detail: String
+    /// Missing means the item will never succeed and must not be retried.
+    let retryable: Bool?
 }
 
 public struct BatchResultItem: Codable, Sendable {
@@ -328,7 +358,6 @@ internal struct StorageKeys {
     static let deviceInfo = "phase-analytics/device-info"
     static let offlineQueue = "phase-analytics/offline-queue"
     static let apiKey = "phase-analytics/api-key"
-    static let sessionStartedAt = "phase-analytics/session-started-at"
 }
 
 public struct AnyCodable: Codable, @unchecked Sendable {
@@ -370,8 +399,14 @@ public struct AnyCodable: Codable, @unchecked Sendable {
             try container.encode(bool)
         case let int as Int:
             try container.encode(int)
+        case let int as Int32:
+            try container.encode(int)
+        case let int as Int64:
+            try container.encode(int)
         case let double as Double:
             try container.encode(double)
+        case let float as Float:
+            try container.encode(Double(float))
         case let string as String:
             try container.encode(string)
         case let array as [Any]:

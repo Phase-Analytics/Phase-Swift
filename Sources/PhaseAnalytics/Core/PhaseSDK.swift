@@ -1,45 +1,46 @@
 import Foundation
 
-#if canImport(UIKit)
-    import UIKit
-#endif
-
 public final class PhaseSDK: Sendable {
     public static let shared = PhaseSDK()
 
-    private let httpClient: ThreadSafeLock<HTTPClient?>
-    private let offlineQueue: ThreadSafeLock<OfflineQueue?>
-    private let batchSender: ThreadSafeLock<BatchSender?>
-    private let deviceManager: ThreadSafeLock<DeviceManager?>
-    private let sessionManager: ThreadSafeLock<SessionManager?>
-    private let eventManager: ThreadSafeLock<EventManager?>
+    private struct Components: Sendable {
+        let sender: BatchSender
+        let device: DeviceManager
+        let session: SessionManager
+        let events: EventManager
+    }
 
-    private let isInitialized: ThreadSafeLock<Bool>
-    private let isIdentified: ThreadSafeLock<Bool>
-    private let initializationTask: ThreadSafeLock<Task<Void, Error>?>
-    private let networkUnsubscribe: ThreadSafeLock<UnsubscribeFn?>
-    private let appStateObservers: ThreadSafeLock<[Any]>
-    private let pendingCalls: ThreadSafeLock<[@Sendable () async -> Void]>
+    private struct State {
+        var components: Components?
+        var initializationTask: Task<Void, Error>?
+        var resetTask: Task<Void, Never>?
+        var isIdentified = false
+        /// identify() calls made before initialization finished, merged (the server merges properties too).
+        var pendingIdentify: [String: Any]??
+    }
 
-    private let networkAdapter: ThreadSafeLock<NetworkAdapter?>
+    private let state = ThreadSafeLock(State())
     private let storage: StorageAdapter
+
+    // Capture-side state exists before initialization so early track() calls are kept, and rate
+    // limiting/deduplication happen once, at call time, never again on replay.
+    private let capturedEvents = CapturedEventBuffer()
+    private let rateLimiter = RateLimiter()
+    private let deduplicator = EventDeduplicator()
+
+    private let networkSequence = ThreadSafeLock(0)
+    private let networkUnsubscribe = ThreadSafeLock<UnsubscribeFn?>(nil)
+    private let lifecycleObserver = ThreadSafeLock<(any Sendable)?>(nil)
 
     internal init(storage: StorageAdapter = UserDefaultsStorage()) {
         self.storage = storage
-        self.httpClient = ThreadSafeLock(nil)
-        self.offlineQueue = ThreadSafeLock(nil)
-        self.batchSender = ThreadSafeLock(nil)
-        self.deviceManager = ThreadSafeLock(nil)
-        self.sessionManager = ThreadSafeLock(nil)
-        self.eventManager = ThreadSafeLock(nil)
-        self.isInitialized = ThreadSafeLock(false)
-        self.isIdentified = ThreadSafeLock(false)
-        self.initializationTask = ThreadSafeLock(nil)
-        self.networkUnsubscribe = ThreadSafeLock(nil)
-        self.appStateObservers = ThreadSafeLock([])
-        self.pendingCalls = ThreadSafeLock([])
-        self.networkAdapter = ThreadSafeLock(nil)
     }
+
+    private var components: Components? {
+        state.withLock { $0.components }
+    }
+
+    // MARK: - Initialization
 
     /// Initialize the SDK (required before tracking)
     ///
@@ -102,39 +103,31 @@ public final class PhaseSDK: Sendable {
         getDeviceInfo: @escaping @Sendable () async -> DeviceInfo,
         networkAdapter: NetworkAdapter
     ) async throws {
-        if isInitialized.withLock({ $0 }) {
+        enum Action {
+            case alreadyInitialized
+            case wait(Task<Void, Error>)
+        }
+
+        let action = state.withLock { state -> Action in
+            if state.components != nil {
+                return .alreadyInitialized
+            }
+            if let running = state.initializationTask {
+                return .wait(running)
+            }
+            let task = Task<Void, Error> {
+                try await self.doInitialize(
+                    config: config, getDeviceInfo: getDeviceInfo, networkAdapter: networkAdapter)
+            }
+            state.initializationTask = task
+            return .wait(task)
+        }
+
+        switch action {
+        case .alreadyInitialized:
             logger.warn("SDK already initialized. Skipping duplicate initialization.")
-            return
-        }
-
-        if let existingTask = initializationTask.withLock({ $0 }) {
-            logger.warn("SDK initialization already in progress. Waiting.")
-            try await existingTask.value
-            return
-        }
-
-        let task = Task<Void, Error> {
-            try await doInitialize(config: config, getDeviceInfo: getDeviceInfo, networkAdapter: networkAdapter)
-        }
-        initializationTask.withLock { $0 = task }
-
-        do {
+        case .wait(let task):
             try await task.value
-            initializationTask.withLock { $0 = nil }
-        } catch {
-            initializationTask.withLock { $0 = nil }
-
-            let pendingToCancel = pendingCalls.withLock { calls in
-                let current = calls
-                calls.removeAll()
-                return current
-            }
-
-            if !pendingToCancel.isEmpty {
-                logger.error("Clearing \(pendingToCancel.count) queued calls due to initialization failure")
-            }
-
-            throw error
         }
     }
 
@@ -143,81 +136,70 @@ public final class PhaseSDK: Sendable {
         getDeviceInfo: @escaping @Sendable () async -> DeviceInfo,
         networkAdapter: NetworkAdapter
     ) async throws {
-
-        guard !config.apiKey.isEmpty, !config.apiKey.trimmingCharacters(in: .whitespaces).isEmpty else {
-            logger.error("API key is required. Please provide a valid API key.")
-            throw PhaseError.invalidAPIKey
-        }
-
-        guard config.apiKey.hasPrefix("phase_") else {
-            logger.error("Invalid API key format. API key must start with 'phase_'")
-            throw PhaseError.invalidAPIKey
-        }
-
         logger.setLogLevel(config.logLevel)
-        self.networkAdapter.withLock { $0 = networkAdapter }
 
-        let netState = await networkAdapter.fetchNetworkState()
-        let isOnline = netState.isConnected
+        let trimmedKey = config.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty, config.apiKey.hasPrefix("phase_") else {
+            logger.error("Invalid API key. It is required and must start with 'phase_'.")
+            state.withLock { state in
+                state.initializationTask = nil
+                state.pendingIdentify = nil
+            }
+            throw PhaseError.invalidAPIKey
+        }
 
+        let isOnline = await networkAdapter.fetchNetworkState().isConnected
         logger.info("Initializing Phase SDK (baseURL: \(config.baseURL), isOnline: \(isOnline))")
 
-        let client = HTTPClient(
-            apiKey: config.apiKey,
-            baseURL: config.baseURL,
-            debugData: config.debugData
-        )
-        httpClient.withLock { $0 = client }
-
+        let client = HTTPClient(apiKey: config.apiKey, baseURL: config.baseURL, debugData: config.debugData)
         let queue = OfflineQueue(storage: storage)
         await queue.initialize()
-        offlineQueue.withLock { $0 = queue }
 
-        let sender = BatchSender(httpClient: client, offlineQueue: queue)
-        batchSender.withLock { $0 = sender }
-
-        let devManager = DeviceManager(
+        let sender = BatchSender(
             httpClient: client,
             offlineQueue: queue,
-            storage: storage,
-            getDeviceInfo: getDeviceInfo,
-            config: config
-        )
-        let deviceID = await devManager.initialize(isOnline: isOnline)
-        deviceManager.withLock { $0 = devManager }
-
-        let sessManager = SessionManager(
-            httpClient: client,
-            offlineQueue: queue,
-            deviceID: deviceID,
-            storage: storage
-        )
-        sessionManager.withLock { $0 = sessManager }
-
-        let evtManager = EventManager(
-            httpClient: client,
-            offlineQueue: queue,
-            getSessionID: { [weak self] in
-                guard let self = self else { return nil }
-                return await self.sessionManager.withLock({ $0 })?.getSessionID()
-            },
-            markActivity: { [weak self] in
-                guard let self = self else { return }
-                await self.sessionManager.withLock({ $0 })?.markActivity()
+            isOnline: isOnline,
+            onDelivered: { [weak self] in
+                await self?.components?.session.markActivity()
             }
         )
-        eventManager.withLock { $0 = evtManager }
 
-        setupNetworkListener()
-        setupAppStateListener()
+        let device = DeviceManager(sender: sender, storage: storage, getDeviceInfo: getDeviceInfo, config: config)
+        let deviceID = await device.initialize()
 
-        isInitialized.withLock { $0 = true }
+        let session = SessionManager(sender: sender, deviceID: deviceID)
+        let events = EventManager(
+            buffer: capturedEvents,
+            sender: sender,
+            getSession: { await session.currentSession() }
+        )
+        let components = Components(sender: sender, device: device, session: session, events: events)
+
+        observeNetwork(networkAdapter, sender: sender)
+        observeLifecycle(components)
+
+        let pendingIdentify = state.withLock { state -> [String: Any]?? in
+            state.components = components
+            state.initializationTask = nil
+            let pending = state.pendingIdentify
+            state.pendingIdentify = nil
+            return pending
+        }
         logger.info("Phase SDK initialized successfully. Call identify() to start tracking.")
 
-        await processPendingCalls()
+        // Anything left in the queue from a previous launch.
+        await sender.requestFlush()
+
+        if let properties = pendingIdentify {
+            await identifyNow(components, properties: properties.map { DeviceProperties($0) })
+        }
     }
 
+    // MARK: - Identity
+
     /// Register device and start session
+    ///
+    /// Safe to call before `initialize()` finishes: the call is remembered and runs right after it.
     ///
     /// - Parameter properties: Custom device attributes (optional, primitives only)
     ///
@@ -230,56 +212,94 @@ public final class PhaseSDK: Sendable {
     /// await PhaseSDK.shared.identify(["user_id": "123", "plan": "premium"])
     /// ```
     public func identify(_ properties: DeviceProperties? = nil) async {
-        guard isInitialized.withLock({ $0 }) else {
-            logger.warn("SDK not initialized. Queuing identify() call.")
-            await withCheckedContinuation { continuation in
-                pendingCalls.withLock { calls in
-                    calls.append {
-                        await self.identify(properties)
-                        continuation.resume()
-                    }
-                }
+        if let resetting = state.withLock({ $0.resetTask }) {
+            await resetting.value
+        }
+
+        let components = state.withLock { state -> Components? in
+            if let components = state.components {
+                return components
             }
+            let existing = state.pendingIdentify.flatMap { $0 } ?? [:]
+            let merged = existing.merging(properties?.dictionary ?? [:]) { _, new in new }
+            state.pendingIdentify = .some(merged.isEmpty ? nil : merged)
+            return nil
+        }
+
+        guard let components else {
+            logger.info("SDK not initialized yet. identify() will run after initialization.")
             return
         }
 
-        guard let devManager = deviceManager.withLock({ $0 }),
-            let sessManager = sessionManager.withLock({ $0 }),
-            let adapter = networkAdapter.withLock({ $0 })
-        else {
-            logger.error("SDK components not ready")
-            return
-        }
+        await identifyNow(components, properties: properties)
+    }
 
-        let netState = await adapter.fetchNetworkState()
-        let isOnline = netState.isConnected
+    private func identifyNow(_ components: Components, properties: DeviceProperties?) async {
+        await components.device.identify(properties: properties)
+        await components.session.start(earliestActivity: capturedEvents.earliestTimestamp())
 
-        await devManager.identify(isOnline: isOnline, properties: properties)
-        _ = await sessManager.start(isOnline: isOnline)
-
-        isIdentified.withLock { $0 = true }
+        state.withLock { $0.isIdentified = true }
         logger.info("Device identified and session started")
 
-        await processPendingCalls()
-
-        if isOnline,
-           let queue = offlineQueue.withLock({ $0 }),
-           let sender = batchSender.withLock({ $0 })
-        {
-            let queueSize = await queue.getSize()
-            if queueSize > 0 {
-                logger.info("Flushing offline queue after identification (\(queueSize) items)")
-                await sender.flush()
-            }
-        }
+        await components.events.deliverPending()
+        await components.sender.requestFlush()
     }
+
+    /// Forget the current device (e.g. on logout)
+    ///
+    /// Ends the session, tries to deliver queued data, discards what could not be sent and
+    /// generates a new device ID. Call `identify()` again to start tracking the new device.
+    /// Events tracked in the meantime are kept and sent after that `identify()`.
+    public func reset() async {
+        let task = state.withLock { state -> Task<Void, Never> in
+            if let running = state.resetTask {
+                return running
+            }
+            let task = Task { await self.performReset() }
+            state.resetTask = task
+            return task
+        }
+        await task.value
+    }
+
+    private func performReset() async {
+        let components = state.withLock { state -> Components? in
+            state.isIdentified = false
+            state.pendingIdentify = nil
+            return state.components
+        }
+
+        defer { state.withLock { $0.resetTask = nil } }
+
+        guard let components else {
+            logger.warn("reset() called before initialization. Nothing to reset.")
+            return
+        }
+
+        // Events captured before reset() belong to the old session.
+        await components.events.deliverPending()
+        await components.session.end()
+
+        await components.sender.flush()
+        let discarded = await components.sender.clearQueue()
+        if discarded > 0 {
+            logger.warn("reset() discarded \(discarded) unsent item(s).")
+        }
+
+        let newDeviceID = await components.device.resetIdentity()
+        await components.session.reset(deviceID: newDeviceID)
+        logger.info("SDK reset. Call identify() to start tracking again.")
+    }
+
+    // MARK: - Tracking
 
     /// Track custom event
     ///
-    /// Calls are automatically queued if SDK is not ready yet.
+    /// Events tracked before `initialize()`/`identify()` complete are kept (up to 200, for up to an
+    /// hour) with their original timestamps and sent once a session exists.
     ///
     /// - Parameters:
-    ///   - name: Event name (required, alphanumeric, `_`, `-`, `.`, `/`, space)
+    ///   - name: Event name (required, letters, digits, `_`, `-`, `.`, `/`, space)
     ///   - params: Event parameters (optional, primitives only)
     ///
     /// ## Example
@@ -287,34 +307,7 @@ public final class PhaseSDK: Sendable {
     /// PhaseSDK.shared.track("purchase", params: ["amount": 99.99, "currency": "USD"])
     /// ```
     public func track(_ name: String, params: EventParams? = nil) {
-        guard isInitialized.withLock({ $0 }) else {
-            logger.warn("SDK not initialized. Queuing track() call.")
-            pendingCalls.withLock { calls in
-                calls.append {
-                    self.track(name, params: params)
-                }
-            }
-            return
-        }
-
-        guard isIdentified.withLock({ $0 }) else {
-            logger.warn("Device not identified. Queuing track() call.")
-            pendingCalls.withLock { calls in
-                calls.append {
-                    self.track(name, params: params)
-                }
-            }
-            return
-        }
-
-        guard let evtManager = eventManager.withLock({ $0 }) else {
-            logger.error("Event manager not available")
-            return
-        }
-
-        Task {
-            await evtManager.track(name: name, params: params, isScreen: false)
-        }
+        capture(name: name, params: params, isScreen: false)
     }
 
     /// Track screen view (for SwiftUI, prefer `.phaseScreen()` modifier)
@@ -328,205 +321,112 @@ public final class PhaseSDK: Sendable {
     /// PhaseSDK.shared.trackScreen("/profile", params: ["user_id": "123"])
     /// ```
     public func trackScreen(_ name: String, params: EventParams? = nil) {
-        guard isInitialized.withLock({ $0 }) else {
-            logger.warn("SDK not initialized. Queuing trackScreen() call.")
-            pendingCalls.withLock { calls in
-                calls.append {
-                    self.trackScreen(name, params: params)
-                }
-            }
-            return
-        }
-
-        guard isIdentified.withLock({ $0 }) else {
-            logger.warn("Device not identified. Queuing trackScreen() call.")
-            pendingCalls.withLock { calls in
-                calls.append {
-                    self.trackScreen(name, params: params)
-                }
-            }
-            return
-        }
-
-        guard let evtManager = eventManager.withLock({ $0 }) else {
-            logger.error("Event manager not available")
-            return
-        }
-
-        Task {
-            await evtManager.track(name: name, params: params, isScreen: true)
-        }
+        capture(name: name, params: params, isScreen: true)
     }
 
     /// Track custom event (static convenience method)
-    ///
-    /// - Parameters:
-    ///   - name: Event name (required, alphanumeric, `_`, `-`, `.`, `/`, space)
-    ///   - params: Event parameters (optional, primitives only)
-    ///
-    /// ## Example
-    /// ```swift
-    /// track("purchase", ["amount": 99.99, "currency": "USD"])
-    /// ```
     public static func track(_ name: String, _ params: [String: Any]? = nil) {
-        let eventParams = params.map { EventParams($0) }
-        shared.track(name, params: eventParams)
+        shared.track(name, params: params.map { EventParams($0) })
     }
 
     /// Track screen view (static convenience method)
-    ///
-    /// - Parameters:
-    ///   - name: Screen name (required, use path format like "/home")
-    ///   - params: Additional parameters (optional, primitives only)
-    ///
-    /// ## Example
-    /// ```swift
-    /// trackScreen("/profile", ["user_id": "123"])
-    /// ```
     public static func trackScreen(_ name: String, _ params: [String: Any]? = nil) {
-        let eventParams = params.map { EventParams($0) }
-        shared.trackScreen(name, params: eventParams)
+        shared.trackScreen(name, params: params.map { EventParams($0) })
     }
 
-    private func processPendingCalls() async {
-        let calls = pendingCalls.withLock { calls in
-            let current = calls
-            calls.removeAll()
-            return current
-        }
-
-        guard !calls.isEmpty else { return }
-
-        logger.info("Processing \(calls.count) queued calls")
-
-        for call in calls {
-            await call()
-        }
+    /// Send queued data now
+    ///
+    /// Returns when the attempt finishes. Does nothing while offline or while the server asked the
+    /// SDK to back off; data stays queued and is retried automatically.
+    public func flush() async {
+        guard let components else { return }
+        await components.events.deliverPending()
+        await components.sender.flush()
+        await components.sender.persist()
     }
 
-    private static let camelCaseRegex = try? NSRegularExpression(pattern: "([a-z])([A-Z])")
-    private static let numericSegmentRegex = try? NSRegularExpression(pattern: "/\\d+")
-
-    /// Normalize path to match server-side normalization
-    /// - "HomeView" → "/home-view" (CamelCase to kebab)
-    /// - "/users/123" → "/users/:id" (numeric segments)
-    /// - "//home//" → "/home" (multiple slashes, trailing slash)
-    /// - "/path?query#hash" → "/path" (query string, hash removed)
-    internal static func formatScreenName(_ name: String) -> String {
-        var path = name
-
-        if let queryIndex = path.firstIndex(of: "?") {
-            path = String(path[..<queryIndex])
-        }
-        if let hashIndex = path.firstIndex(of: "#") {
-            path = String(path[..<hashIndex])
-        }
-
-        if let regex = camelCaseRegex {
-            let range = NSRange(path.startIndex..., in: path)
-            path = regex.stringByReplacingMatches(in: path, range: range, withTemplate: "$1-$2")
-        }
-
-        path = path.lowercased()
-
-        while path.contains("//") {
-            path = path.replacingOccurrences(of: "//", with: "/")
-        }
-
-        if let regex = numericSegmentRegex {
-            let range = NSRange(path.startIndex..., in: path)
-            path = regex.stringByReplacingMatches(in: path, range: range, withTemplate: "/:id")
-        }
-
-        if path.hasSuffix("/") && path.count > 1 {
-            path = String(path.dropLast())
-        }
-
-        if !path.hasPrefix("/") {
-            path = "/" + path
-        }
-
-        return path.isEmpty ? "/" : path
-    }
-
-    #if canImport(UIKit)
-        private func setupAppStateListener() {
-            let backgroundObserver = NotificationCenter.default.addObserver(
-                forName: UIApplication.didEnterBackgroundNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                logger.info("App backgrounded. Pausing session ping.")
-                Task {
-                    await self?.sessionManager.withLock({ $0 })?.pause()
-                }
-            }
-
-            let foregroundObserver = NotificationCenter.default.addObserver(
-                forName: UIApplication.willEnterForegroundNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                logger.info("App foregrounded. Resuming session ping.")
-                Task {
-                    await self?.sessionManager.withLock({ $0 })?.resume()
-                }
-            }
-
-            appStateObservers.withLock { $0 = [backgroundObserver, foregroundObserver] }
-        }
-    #else
-        private func setupAppStateListener() {
-        }
-    #endif
-
-    private func setupNetworkListener() {
-        guard let adapter = networkAdapter.withLock({ $0 }) else {
-            logger.error("Network adapter not initialized")
+    private func capture(name: String, params: EventParams?, isScreen: Bool) {
+        guard case .success = Validator.validateEventName(name) else {
+            logger.error("Invalid event name '\(name)'. Use letters, digits, _, -, ., /, or space (max 256).")
             return
         }
 
-        let unsubscribe = adapter.addNetworkListener { [weak self] state in
-            let isOnline = state.isConnected
-
-            Task {
-                await self?.sessionManager.withLock({ $0 })?.updateNetworkState(isOnline: isOnline)
-                await self?.eventManager.withLock({ $0 })?.updateNetworkState(isOnline: isOnline)
-
-                if isOnline, let self = self, self.isIdentified.withLock({ $0 }) {
-                    if let queue = self.offlineQueue.withLock({ $0 }) {
-                        let queueSize = await queue.getSize()
-                        if queueSize > 0 {
-                            logger.info("Network restored, flushing offline queue")
-                            if let sender = self.batchSender.withLock({ $0 }) {
-                                await sender.flush()
-                            }
-                        }
-                    }
-                }
-            }
+        if case .failure(let error) = Validator.validateEventParams(params) {
+            logger.error("Invalid event params for '\(name)'.", error)
+            return
         }
 
+        guard rateLimiter.canTrack() else {
+            return
+        }
+
+        guard !deduplicator.isDuplicate(name: name, params: params) else {
+            logger.warn("Duplicate event detected. Ignoring: \(name)")
+            return
+        }
+
+        capturedEvents.append(
+            CapturedEvent(
+                eventId: IDGenerator.generateEventID(),
+                name: name,
+                params: params?.dictionary.mapValues { AnyCodable($0) },
+                isScreen: isScreen,
+                timestamp: Date()
+            ))
+
+        // Before identify() the event waits in the buffer and is delivered by identify().
+        let ready = state.withLock { $0.isIdentified ? $0.components : nil }
+        guard let events = ready?.events else { return }
+        Task {
+            await events.deliverPending()
+        }
+    }
+
+    // MARK: - Environment
+
+    private func observeNetwork(_ adapter: NetworkAdapter, sender: BatchSender) {
+        let sequence = networkSequence
+        let unsubscribe = adapter.addNetworkListener { state in
+            let current = sequence.withLock { value -> Int in
+                value += 1
+                return value
+            }
+            Task {
+                await sender.updateNetworkState(isOnline: state.isConnected, sequence: current)
+            }
+        }
         networkUnsubscribe.withLock { $0 = unsubscribe }
+    }
+
+    private func observeLifecycle(_ components: Components) {
+        #if canImport(UIKit)
+            let observer = AppLifecycleObserver(
+                onBackground: { sequence in
+                    await components.session.pause(sequence: sequence)
+                    await components.events.deliverPending()
+                    // Persist first: suspension can come before the network does.
+                    await components.sender.persist()
+                    await components.sender.flush()
+                    await components.sender.persist()
+                },
+                onForeground: { sequence in
+                    await components.session.resume(sequence: sequence)
+                    await components.sender.requestFlush()
+                }
+            )
+            lifecycleObserver.withLock { $0 = observer }
+        #endif
     }
 
     deinit {
         networkUnsubscribe.withLock { $0?() }
-
-        #if canImport(UIKit)
-            appStateObservers.withLock { observers in
-                for observer in observers {
-                    NotificationCenter.default.removeObserver(observer)
-                }
-            }
-        #endif
     }
 }
 
 /// Track custom event
 ///
 /// - Parameters:
-///   - name: Event name (required, alphanumeric, `_`, `-`, `.`, `/`)
+///   - name: Event name (required, letters, digits, `_`, `-`, `.`, `/`, space)
 ///   - params: Event parameters (optional, primitives only)
 ///
 /// ## Example

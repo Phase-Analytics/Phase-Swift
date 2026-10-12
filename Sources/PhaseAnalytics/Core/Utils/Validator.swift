@@ -83,27 +83,90 @@ internal struct Validator {
         }
 
         let dict = params.dictionary
+        let limits = ValidationConstants.EventParams.self
 
-        for (key, value) in dict where !isFlatValue(value) {
-            return .failure(
-                .validationFailed(
-                    "Param '\(key)' must be a String, Int, Double, Bool, or nil. Nested objects/arrays are not allowed."
-                ))
+        guard dict.count <= limits.maxKeys else {
+            return .failure(.validationFailed("Event params exceed maximum key count of \(limits.maxKeys)"))
         }
 
-        do {
-            let data = try JSONSerialization.data(withJSONObject: dict, options: [])
-            guard data.count <= ValidationConstants.EventParams.maxSize else {
+        // Lengths are UTF-16 code units to match the server's JavaScript `string.length`.
+        for (key, value) in dict {
+            guard key.utf16.count <= limits.maxKeyLength else {
+                return .failure(
+                    .validationFailed("Param key '\(key)' exceeds maximum length of \(limits.maxKeyLength)"))
+            }
+
+            if let failure = flatValueFailure(key: key, value: value) {
+                return .failure(failure)
+            }
+
+            if let string = value as? String, string.utf16.count > limits.maxStringValueLength {
                 return .failure(
                     .validationFailed(
-                        "Event params exceed maximum size of \(ValidationConstants.EventParams.maxSize) bytes"
-                    ))
+                        "Param '\(key)' exceeds maximum string length of \(limits.maxStringValueLength)"))
+            }
+        }
+
+        return validateJSONSize(dict, maxSize: limits.maxSize, label: "Event params")
+    }
+
+    /// Device properties share a batch with other items; an invalid one makes the server reject
+    /// the whole request, so they must be checked before they are queued.
+    static func validateDeviceProperties(_ properties: [String: Any]) -> Result<Void, PhaseError> {
+        let limits = ValidationConstants.DeviceProperties.self
+
+        for (key, value) in properties {
+            guard key.utf16.count <= limits.maxKeyLength else {
+                return .failure(
+                    .validationFailed("Property key '\(key)' exceeds maximum length of \(limits.maxKeyLength)"))
+            }
+
+            if let failure = flatValueFailure(key: key, value: value) {
+                return .failure(failure)
+            }
+        }
+
+        return validateJSONSize(properties, maxSize: limits.maxSize, label: "Device properties")
+    }
+
+    private static func flatValueFailure(key: String, value: Any) -> PhaseError? {
+        guard isFlatValue(value) else {
+            return .validationFailed(
+                "'\(key)' must be a String, Int, Double, Bool, or nil. Nested objects/arrays are not allowed.")
+        }
+
+        // Non-finite numbers are not representable in JSON; JSONSerialization raises an
+        // Objective-C exception (a crash) on them, so they must be rejected before serializing.
+        guard isFinite(value) else {
+            return .validationFailed("'\(key)' must be a finite number")
+        }
+
+        return nil
+    }
+
+    private static func validateJSONSize(_ dict: [String: Any], maxSize: Int, label: String) -> Result<
+        Void, PhaseError
+    > {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: dict, options: [])
+            guard data.count <= maxSize else {
+                return .failure(.validationFailed("\(label) exceed maximum size of \(maxSize) bytes"))
             }
         } catch {
-            return .failure(.validationFailed("Event params must be JSON serializable"))
+            return .failure(.validationFailed("\(label) must be JSON serializable"))
         }
 
         return .success(())
+    }
+
+    private static func isFinite(_ value: Any) -> Bool {
+        if let double = value as? Double {
+            return double.isFinite
+        }
+        if let float = value as? Float {
+            return float.isFinite
+        }
+        return true
     }
 
     private static func isFlatValue(_ value: Any) -> Bool {
